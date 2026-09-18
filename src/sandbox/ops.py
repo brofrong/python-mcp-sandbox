@@ -87,13 +87,43 @@ async def get_file(session_id: str, file_path: str) -> tuple[bytes, str]:
         return dest.read_bytes(), mime_for(dest)
 
 
+def _enforce_workspace_quota(session_id: str, result: dict[str, object]) -> dict[str, object]:
+    workspace = workspace_dir(session_id, create=False)
+    if not workspace.exists() or workspace_size(workspace) <= MAX_WORKSPACE_BYTES:
+        return result
+    files = result.get("files")
+    if isinstance(files, list):
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            relative = item.get("path")
+            if not isinstance(relative, str):
+                continue
+            try:
+                dest = resolve_relative(workspace, relative)
+            except ValueError:
+                continue
+            if dest.is_file():
+                dest.unlink(missing_ok=True)
+    stderr = str(result.get("stderr", ""))
+    if len(stderr) > 0 and not stderr.endswith("\n"):
+        stderr += "\n"
+    return {
+        **result,
+        "exitCode": 1,
+        "stderr": stderr + "workspace too large",
+        "files": [],
+    }
+
+
 async def execute(session_id: str, code: str, timeout_ms: int) -> dict[str, object]:
     sid = require_session_id(session_id)
     if len(code) < 1 or len(code) > MAX_CODE_CHARS:
         raise SandboxOpError(400, "invalid code")
     if timeout_ms < MIN_TIMEOUT_MS or timeout_ms > MAX_TIMEOUT_MS:
         raise SandboxOpError(400, "invalid timeout")
-    return await manager.execute(sid, code, timeout_ms)
+    result = await manager.execute(sid, code, timeout_ms)
+    return _enforce_workspace_quota(sid, result)
 
 
 async def delete_session(session_id: str) -> dict[str, bool]:

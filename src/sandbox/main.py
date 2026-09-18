@@ -9,7 +9,7 @@ from typing import NoReturn
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from sandbox.auth_asgi import BearerAuthASGI
+from sandbox.auth_asgi import BearerAuthASGI, init_bearer_secret
 from sandbox.mcp_server import make_mcp_app, mcp
 from sandbox.ops import (
     DEFAULT_TIMEOUT_MS,
@@ -68,6 +68,7 @@ async def _reap_loop() -> None:
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if len(os.environ.get("SANDBOX_SECRET", "")) == 0:
         raise RuntimeError("SANDBOX_SECRET is required")
+    init_bearer_secret()
     from sandbox.sessions import manager
 
     reap_task = asyncio.create_task(_reap_loop())

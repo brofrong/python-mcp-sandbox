@@ -11,11 +11,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY src ./src
 ENV PYTHONPATH=/app/src
 ENV SANDBOX_DATA=/data
+ENV SANDBOX_REQUIRE_ISOLATION=1
 ENV MPLBACKEND=Agg
 
 RUN useradd --create-home --uid 1000 sandbox \
   && mkdir -p /data \
-  && chown -R sandbox:sandbox /data /app
+  && chown sandbox:sandbox /data \
+  && chown -R root:root /app \
+  && chmod -R go-w /app
 
 USER sandbox
 EXPOSE 8090

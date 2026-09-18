@@ -63,6 +63,17 @@ class _PathBeneath(ctypes.Structure):
     ]
 
 
+class IsolationError(Exception):
+    pass
+
+
+def isolation_required() -> bool:
+    flag = os.environ.get("SANDBOX_REQUIRE_ISOLATION")
+    if flag is not None:
+        return flag.strip().lower() not in {"0", "false", "no"}
+    return sys.platform == "linux"
+
+
 def worker_env(*, workspace: str, pythonpath: str, result_fd: int) -> dict[str, str]:
     env: dict[str, str] = {}
     for key in _SAFE_ENV:
@@ -91,14 +102,22 @@ def worker_env(*, workspace: str, pythonpath: str, result_fd: int) -> dict[str, 
             ),
         }
     )
+    required = os.environ.get("SANDBOX_REQUIRE_ISOLATION")
+    if required:
+        env["SANDBOX_REQUIRE_ISOLATION"] = required
     return env
 
 
 def isolate_self(workspace: str) -> None:
     os.environ.pop("SANDBOX_SECRET", None)
+    required = isolation_required()
     if sys.platform == "linux":
-        _unshare_net()
-        _landlock(workspace)
+        if not _unshare_net() and required:
+            raise IsolationError("network unshare failed")
+        if not _landlock(workspace) and required:
+            raise IsolationError("landlock failed")
+    elif required:
+        raise IsolationError("isolation required but platform is not linux")
     _apply_rlimits()
 
 
@@ -116,7 +135,7 @@ def _apply_rlimits() -> None:
         return
 
 
-def _unshare_net() -> None:
+def _unshare_net() -> bool:
     newuser = getattr(os, "CLONE_NEWUSER", 0x10000000)
     newnet = getattr(os, "CLONE_NEWNET", 0x40000000)
     uid = os.getuid()
@@ -124,20 +143,17 @@ def _unshare_net() -> None:
     try:
         os.unshare(newuser | newnet)
     except (AttributeError, OSError):
-        try:
-            os.unshare(newnet)
-        except (AttributeError, OSError):
-            return
-        return
+        return False
     try:
         Path("/proc/self/setgroups").write_text("deny")
         Path("/proc/self/uid_map").write_text(f"{uid} {uid} 1")
         Path("/proc/self/gid_map").write_text(f"{gid} {gid} 1")
     except OSError:
-        return
+        return False
+    return True
 
 
-def _landlock(workspace: str) -> None:
+def _landlock(workspace: str) -> bool:
     libc_name = ctypes.util.find_library("c") or "c"
     libc = ctypes.CDLL(libc_name, use_errno=True)
     libc.syscall.restype = ctypes.c_long
@@ -148,7 +164,7 @@ def _landlock(workspace: str) -> None:
         ctypes.c_uint32(_LANDLOCK_CREATE_RULESET_VERSION),
     )
     if abi < 1:
-        return
+        return False
 
     handled_fs = (
         _FS_EXECUTE
@@ -181,7 +197,7 @@ def _landlock(workspace: str) -> None:
         ctypes.c_uint32(0),
     )
     if ruleset < 0:
-        return
+        return False
 
     ro = _FS_EXECUTE | _FS_READ_FILE | _FS_READ_DIR
     if abi >= 5:
@@ -209,9 +225,11 @@ def _landlock(workspace: str) -> None:
         "/sbin",
         "/app",
         "/etc",
-        "/proc",
         "/dev",
         "/run",
+        "/proc/cpuinfo",
+        "/proc/meminfo",
+        "/sys/devices/system/cpu",
         sys.prefix,
         sys.base_prefix,
         sys.exec_prefix,
@@ -228,8 +246,7 @@ def _landlock(workspace: str) -> None:
             ctypes.c_int(int(ruleset)),
             ctypes.c_uint32(0),
         )
-        if rc < 0:
-            return
+        return rc >= 0
     finally:
         os.close(int(ruleset))
 

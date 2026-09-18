@@ -38,7 +38,7 @@ One container = one backend. Do not share an instance across untrusted services.
 ```bash
 docker build -t python-mcp-sandbox .
 docker run -d --name sandbox \
-  -p 8090:8090 \
+  -p 127.0.0.1:8090:8090 \
   -e SANDBOX_SECRET=change-me \
   -v sandbox-data:/data \
   python-mcp-sandbox
@@ -208,7 +208,7 @@ You are integrating a backend with an existing Docker Python sandbox. The sandbo
 
 ```bash
 docker run -d --name sandbox \
-  -p 8090:8090 \
+  -p 127.0.0.1:8090:8090 \
   -e SANDBOX_SECRET=<long random secret> \
   -v sandbox-data:/data \
   python-mcp-sandbox

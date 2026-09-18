@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import array
 import builtins
 import contextlib
 import io
 import json
 import os
+import signal
+import socket
+import struct
 import sys
 import traceback
 from collections.abc import Callable
@@ -17,11 +21,10 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 WORKSPACE = os.path.realpath(os.environ["SANDBOX_WORKSPACE"])
 VIRTUAL_ROOT = "/workspace"
-isolate_self(WORKSPACE)
-os.chdir(WORKSPACE)
 
 _globals: dict[str, object] = {"__name__": "__main__"}
 MAX_CAPTURE = 1_000_000
+_MAX_MSG = 2_500_000
 _real_getcwd = os.getcwd
 _real_realpath = os.path.realpath
 
@@ -140,11 +143,116 @@ def _send(result_fd: int, payload: dict[str, object]) -> None:
         view = view[written:]
 
 
-def main() -> None:
-    raw_fd = os.environ.get("SANDBOX_RESULT_FD")
-    if raw_fd is None:
-        raise SystemExit("SANDBOX_RESULT_FD is required")
-    result_fd = int(raw_fd)
+def _recvall(sock: socket.socket, size: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < size:
+        piece = sock.recv(size - len(chunks))
+        if not piece:
+            raise OSError("kernel socket closed")
+        chunks.extend(piece)
+    return bytes(chunks)
+
+
+def _send_msg(sock: socket.socket, payload: dict[str, object]) -> None:
+    data = json.dumps(payload).encode("utf-8")
+    sock.sendall(struct.pack(">I", len(data)) + data)
+
+
+def _recv_msg(sock: socket.socket) -> dict[str, object]:
+    header = _recvall(sock, 4)
+    (length,) = struct.unpack(">I", header)
+    if length > _MAX_MSG:
+        raise OSError("kernel message too large")
+    body = json.loads(_recvall(sock, length).decode("utf-8"))
+    if not isinstance(body, dict):
+        raise ValueError("invalid kernel message")
+    return body
+
+
+def _send_fd(sock: socket.socket, fd: int) -> None:
+    encoded = array.array("i", [fd])
+    sock.sendmsg([b"\x01"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, encoded)])
+
+
+def _recv_fd(sock: socket.socket) -> int:
+    _data, anc, _flags, _addr = sock.recvmsg(1, socket.CMSG_LEN(array.array("i").itemsize))
+    for level, typ, cmsg_data in anc:
+        if level == socket.SOL_SOCKET and typ == socket.SCM_RIGHTS:
+            return array.array("i", cmsg_data[: array.array("i").itemsize])[0]
+    raise OSError("missing handed-off fd")
+
+
+def _reap_children(_signum: int = 0, _frame: object = None) -> None:
+    while True:
+        try:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
+def _clamp_nproc(max_procs: int) -> None:
+    if sys.platform != "linux":
+        return
+    try:
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_NPROC, (max_procs, max_procs))
+    except (ImportError, ValueError, OSError):
+        return
+
+
+def _kernel_main(conn: socket.socket, *, apply_isolation: bool) -> None:
+    if apply_isolation:
+        isolate_self(WORKSPACE)
+        os.chdir(WORKSPACE)
+    while True:
+        message = _recv_msg(conn)
+        command = message.get("cmd")
+        if command == "ping":
+            _send_msg(conn, {"ok": True})
+            continue
+        if command != "exec":
+            _send_msg(conn, {"ok": False, "error": "unknown command"})
+            continue
+        _kernel_exec(conn, str(message.get("code", "")))
+
+
+def _kernel_exec(conn: socket.socket, code: str) -> None:
+    local, remote = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    pid = os.fork()
+    if pid == 0:
+        conn.close()
+        local.close()
+        _exec_child(remote, code)
+        os._exit(0)
+    remote.close()
+    os.waitpid(pid, 0)
+    result = _recv_msg(local)
+    _send_msg(conn, result)
+    _send_fd(local, conn.fileno())
+    conn.close()
+    local.close()
+    os._exit(0)
+
+
+def _exec_child(remote: socket.socket, code: str) -> None:
+    _clamp_nproc(1)
+    result = _exec(code)
+    _clamp_nproc(256)
+    pid = os.fork()
+    if pid != 0:
+        os._exit(0)
+    _send_msg(remote, {"ok": True, **result})
+    handed = _recv_fd(remote)
+    remote.close()
+    conn = socket.socket(fileno=handed)
+    _kernel_main(conn, apply_isolation=False)
+
+
+def _supervisor_main(conn: socket.socket, result_fd: int) -> None:
+    signal.signal(signal.SIGCHLD, _reap_children)
     for raw in sys.stdin:
         line = raw.strip()
         if len(line) == 0:
@@ -154,16 +262,48 @@ def main() -> None:
         except json.JSONDecodeError:
             _send(result_fd, {"ok": False, "error": "invalid json", "nonce": ""})
             continue
-        command = message.get("cmd")
         nonce = str(message.get("nonce", ""))
+        command = message.get("cmd")
+        kernel_msg: dict[str, object]
         if command == "ping":
-            _send(result_fd, {"ok": True, "nonce": nonce})
+            kernel_msg = {"cmd": "ping"}
+        elif command == "exec":
+            kernel_msg = {"cmd": "exec", "code": str(message.get("code", ""))}
+        else:
+            _send(result_fd, {"ok": False, "error": "unknown command", "nonce": nonce})
             continue
-        if command == "exec":
-            result = _exec(str(message.get("code", "")))
-            _send(result_fd, {"ok": True, "nonce": nonce, **result})
-            continue
-        _send(result_fd, {"ok": False, "error": "unknown command", "nonce": nonce})
+        try:
+            _send_msg(conn, kernel_msg)
+            body = _recv_msg(conn)
+        except (OSError, ValueError, json.JSONDecodeError):
+            _send(result_fd, {"ok": False, "error": "kernel exited", "nonce": nonce})
+            return
+        body["nonce"] = nonce
+        _send(result_fd, body)
+
+
+def main() -> None:
+    raw_fd = os.environ.pop("SANDBOX_RESULT_FD", None)
+    if raw_fd is None:
+        raise SystemExit("SANDBOX_RESULT_FD is required")
+    result_fd = int(raw_fd)
+    supervisor, kernel = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+    pid = os.fork()
+    if pid == 0:
+        os.close(result_fd)
+        supervisor.close()
+        try:
+            sys.stdin.close()
+        except OSError:
+            pass
+        try:
+            _kernel_main(kernel, apply_isolation=True)
+        except Exception:  # noqa: BLE001 — kernel startup must not fall through
+            traceback.print_exc()
+            os._exit(1)
+        os._exit(0)
+    kernel.close()
+    _supervisor_main(supervisor, result_fd)
 
 
 if __name__ == "__main__":

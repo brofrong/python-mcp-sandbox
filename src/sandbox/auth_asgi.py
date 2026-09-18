@@ -13,16 +13,28 @@ ASGIApp = Callable[[Scope, Receive, Send], Awaitable[None]]
 
 UNAUTHORIZED_BODY = b'{"detail":"unauthorized"}'
 
+_secret_digest: bytes | None = None
 
-def bearer_authorized(authorization: str | None) -> bool:
+
+def init_bearer_secret() -> None:
+    global _secret_digest
     expected = os.environ.get("SANDBOX_SECRET", "")
     if len(expected) == 0:
+        if _secret_digest is None:
+            raise RuntimeError("SANDBOX_SECRET is required")
+        return
+    _secret_digest = hashlib.sha256(expected.encode("utf-8")).digest()
+    os.environ.pop("SANDBOX_SECRET", None)
+
+
+def bearer_authorized(authorization: str | None) -> bool:
+    if _secret_digest is None:
         return False
     provided = ""
     if authorization is not None and authorization.startswith("Bearer "):
         provided = authorization[7:]
-    digest = hashlib.sha256
-    return hmac.compare_digest(digest(provided.encode("utf-8")).digest(), digest(expected.encode("utf-8")).digest())
+    provided_digest = hashlib.sha256(provided.encode("utf-8")).digest()
+    return hmac.compare_digest(provided_digest, _secret_digest)
 
 
 class BearerAuthASGI:
