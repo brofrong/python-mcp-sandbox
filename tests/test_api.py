@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 import time
 import unittest
@@ -9,8 +8,7 @@ from pathlib import Path
 
 os.environ.setdefault("SANDBOX_SECRET", "test-secret")
 os.environ["SANDBOX_DATA"] = tempfile.mkdtemp(prefix="sandbox-test-")
-# Tests run outside Docker. Production images set SANDBOX_REQUIRE_ISOLATION=1.
-os.environ.setdefault("SANDBOX_REQUIRE_ISOLATION", "0")
+# Tests run outside Docker. The worker no longer applies Landlock/rlimits.
 
 from fastapi.testclient import TestClient
 
@@ -41,43 +39,22 @@ class SessionIdValidationTest(unittest.TestCase):
                 self.assertEqual(path.name, session_id)
 
 
-class IsolationRequiredTest(unittest.TestCase):
-    def test_isolation_is_opt_in(self) -> None:
-        from sandbox.isolate import isolation_required
+class IsolateSelfTest(unittest.TestCase):
+    def test_isolate_self_drops_secret(self) -> None:
+        from sandbox.isolate import isolate_self
 
-        original = os.environ.get("SANDBOX_REQUIRE_ISOLATION")
+        original = os.environ.get("SANDBOX_SECRET")
+        workspace = Path(os.environ["SANDBOX_DATA"]) / "workspaces" / "isolate-self"
+        workspace.mkdir(parents=True, exist_ok=True)
         try:
-            os.environ.pop("SANDBOX_REQUIRE_ISOLATION", None)
-            self.assertFalse(isolation_required())
-            os.environ["SANDBOX_REQUIRE_ISOLATION"] = "0"
-            self.assertFalse(isolation_required())
-            os.environ["SANDBOX_REQUIRE_ISOLATION"] = "1"
-            self.assertTrue(isolation_required())
+            os.environ["SANDBOX_SECRET"] = "should-not-leak"
+            isolate_self(str(workspace))
+            self.assertNotIn("SANDBOX_SECRET", os.environ)
         finally:
             if original is None:
-                os.environ.pop("SANDBOX_REQUIRE_ISOLATION", None)
+                os.environ.pop("SANDBOX_SECRET", None)
             else:
-                os.environ["SANDBOX_REQUIRE_ISOLATION"] = original
-
-
-class NprocClampTest(unittest.TestCase):
-    @unittest.skipUnless(sys.platform == "linux", "RLIMIT_NPROC clamp is Linux-only")
-    def test_clamp_nproc_still_allows_fork(self) -> None:
-        import resource
-
-        from sandbox.isolate import clamp_nproc
-
-        original = resource.getrlimit(resource.RLIMIT_NPROC)
-        try:
-            clamp_nproc(1)
-            clamp_nproc(256)
-            pid = os.fork()
-            if pid == 0:
-                os._exit(0)
-            waited, _status = os.waitpid(pid, 0)
-            self.assertEqual(waited, pid)
-        finally:
-            resource.setrlimit(resource.RLIMIT_NPROC, original)
+                os.environ["SANDBOX_SECRET"] = original
 
 
 class WorkerEnvTest(unittest.TestCase):
@@ -89,9 +66,9 @@ class WorkerEnvTest(unittest.TestCase):
         workspace.mkdir(parents=True, exist_ok=True)
         env = worker_env(workspace=str(workspace), pythonpath="/tmp/src", result_fd=3)
         self.assertNotIn("SANDBOX_SECRET", env)
+        self.assertNotIn("SANDBOX_REQUIRE_ISOLATION", env)
         self.assertEqual(env["SANDBOX_WORKSPACE"], str(workspace))
         self.assertEqual(env["SANDBOX_RESULT_FD"], "3")
-        self.assertEqual(env.get("SANDBOX_REQUIRE_ISOLATION"), "0")
 
 
 class SandboxApiTest(unittest.TestCase):

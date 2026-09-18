@@ -19,13 +19,10 @@ services:
     environment:
       SANDBOX_SECRET: ${SANDBOX_SECRET:?set SANDBOX_SECRET in .env}
       SANDBOX_DATA: /data
-      SANDBOX_REQUIRE_ISOLATION: "1"
       SANDBOX_MAX_KERNELS: ${SANDBOX_MAX_KERNELS:-32}
       SANDBOX_IDLE_KERNEL_SECONDS: ${SANDBOX_IDLE_KERNEL_SECONDS:-900}
       SANDBOX_IDLE_WORKSPACE_SECONDS: ${SANDBOX_IDLE_WORKSPACE_SECONDS:-900}
       SANDBOX_MAX_WORKSPACE_BYTES: ${SANDBOX_MAX_WORKSPACE_BYTES:-209715200}
-      SANDBOX_MEMORY_BYTES: ${SANDBOX_MEMORY_BYTES:-536870912}
-      SANDBOX_CPU_SECONDS: ${SANDBOX_CPU_SECONDS:-30}
     volumes:
       - sandbox-data:/data
     tmpfs:
@@ -36,7 +33,7 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
-    # gpt flavor needs more: SANDBOX_MEM_LIMIT=8g SANDBOX_MEMORY_BYTES=2147483648
+    # gpt flavor needs more: SANDBOX_MEM_LIMIT=8g
     mem_limit: ${SANDBOX_MEM_LIMIT:-4g}
     cpus: "2.0"
     ulimits:

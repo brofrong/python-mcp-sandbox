@@ -49,7 +49,7 @@ docker build -t python-mcp-sandbox:zero --build-arg FLAVOR=zero .
 docker build -t python-mcp-sandbox:gpt --build-arg FLAVOR=gpt .
 ```
 
-`gpt` needs extra RAM for PyTorch/JAX (compose: `SANDBOX_MEM_LIMIT=8g`, `SANDBOX_MEMORY_BYTES=2147483648`). Compose flavor: `SANDBOX_FLAVOR=gpt`.
+`gpt` needs extra RAM for PyTorch/JAX (compose: `SANDBOX_MEM_LIMIT=8g`). Compose flavor: `SANDBOX_FLAVOR=gpt`.
 
 ## Quick start
 
@@ -195,8 +195,6 @@ After changing `requirements-*.txt`, rebuild the matching flavor.
 | Single file | 20 MB |
 | Workspace | ~200 MB |
 | Concurrent kernels | 32 |
-| Worker RSS | 512 MB |
-| Worker CPU | 30s |
 | Idle kernel | 15 min |
 | Idle workspace | 15 min |
 
@@ -210,8 +208,6 @@ Tune with env vars:
 | `SANDBOX_IDLE_KERNEL_SECONDS` | `900` |
 | `SANDBOX_IDLE_WORKSPACE_SECONDS` | `900` |
 | `SANDBOX_MAX_WORKSPACE_BYTES` | `209715200` |
-| `SANDBOX_MEMORY_BYTES` | `536870912` |
-| `SANDBOX_CPU_SECONDS` | `30` |
 
 ## Security
 
@@ -219,7 +215,7 @@ This is a **code jail for a trusted backend**, not a multi-tenant public interpr
 
 - Keep the port on a private network. Do not put it on a public reverse proxy.
 - Only the backend should hold `SANDBOX_SECRET`.
-- Still assume user code can burn CPU and disk up to the quotas, and can make outbound network requests.
+- Still assume user code can burn CPU and disk up to the Docker quotas, and can make outbound network requests.
 - Do not mount `docker.sock`. Do not execute code through a shell.
 - One container per backend. Do not share it across untrusted apps.
 
