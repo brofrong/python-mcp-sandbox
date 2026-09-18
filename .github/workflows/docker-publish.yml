@@ -48,8 +48,9 @@ jobs:
           import os
 
           flavors = ["zero", "small"]
-          if os.environ["EVENT_NAME"] != "pull_request":
-              flavors.append("gpt")
+          # GPT flavor is temporarily disabled (slow / expensive).
+          # if os.environ["EVENT_NAME"] != "pull_request":
+          #     flavors.append("gpt")
           rows = []
           for flavor in flavors:
               rows.append(
@@ -156,7 +157,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [zero, small, gpt]
+        flavor: [zero, small] # gpt temporarily disabled
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
