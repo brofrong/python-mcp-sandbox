@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import base64
-from typing import Annotated, Literal, NoReturn
+from collections.abc import Awaitable, Callable
+from typing import Annotated, Literal, NoReturn, TypeVar
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -9,6 +10,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from sandbox.call_log import configure_logger, logged_call
 from sandbox.ops import (
     DEFAULT_TIMEOUT_MS,
     MAX_CODE_CHARS,
@@ -22,6 +24,10 @@ from sandbox.ops import (
     get_session,
     put_file,
 )
+
+T = TypeVar("T")
+
+logger = configure_logger("sandbox.mcp")
 
 INSTRUCTIONS = """\
 Python code-execution sandbox. Each session_id is a persistent kernel + /workspace.
@@ -41,6 +47,26 @@ mcp = MCPServer(
 
 def _raise(error: SandboxOpError) -> NoReturn:
     raise ToolError(error.detail) from error
+
+
+async def _logged(
+    tool: str,
+    session_id: str,
+    op: Callable[[], Awaitable[T]],
+    **extra: object,
+) -> T:
+    try:
+        return await logged_call(
+            logger,
+            "mcp",
+            tool,
+            session_id,
+            op,
+            anticipated=(ToolError,),
+            **extra,
+        )
+    except SandboxOpError as error:
+        _raise(error)
 
 
 @mcp.tool(
@@ -65,10 +91,13 @@ async def execute(
 
     Returns exitCode, stdout, stderr, timedOut, and files created/changed by this run
     (relative paths, no __pycache__)."""
-    try:
-        return await execute_op(session_id, code, timeout_ms)
-    except SandboxOpError as error:
-        _raise(error)
+    return await _logged(
+        "execute",
+        session_id,
+        lambda: execute_op(session_id, code, timeout_ms),
+        code_chars=len(code),
+        timeout_ms=timeout_ms,
+    )
 
 
 @mcp.tool(
@@ -93,14 +122,22 @@ async def write_file(
     mime: str = "application/octet-stream",
 ) -> dict[str, object]:
     """Write a file into the session workspace. Relative path only — no `..`."""
-    try:
-        body = content.encode("utf-8") if encoding == "utf-8" else base64.b64decode(content)
-    except (ValueError, UnicodeError) as error:
-        raise ToolError("invalid content") from error
-    try:
+
+    async def op() -> dict[str, object]:
+        try:
+            body = content.encode("utf-8") if encoding == "utf-8" else base64.b64decode(content)
+        except (ValueError, UnicodeError) as error:
+            raise ToolError("invalid content") from error
         return await put_file(session_id, path, body, mime)
-    except SandboxOpError as error:
-        _raise(error)
+
+    return await _logged(
+        "write_file",
+        session_id,
+        op,
+        path=path,
+        encoding=encoding,
+        content_chars=len(content),
+    )
 
 
 @mcp.tool(
@@ -113,25 +150,26 @@ async def read_file(
     encoding: Literal["utf-8", "base64"] = "base64",
 ) -> dict[str, object]:
     """Read a workspace file. Default content encoding is base64 (safe for binary)."""
-    try:
+
+    async def op() -> dict[str, object]:
         data, mime = await get_file_op(session_id, path)
-    except SandboxOpError as error:
-        _raise(error)
-    if encoding == "utf-8":
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ToolError("file is not valid utf-8; use encoding=base64") from error
-        content: str = text
-    else:
-        content = base64.b64encode(data).decode("ascii")
-    return {
-        "path": path,
-        "size": len(data),
-        "mime": mime,
-        "encoding": encoding,
-        "content": content,
-    }
+        if encoding == "utf-8":
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise ToolError("file is not valid utf-8; use encoding=base64") from error
+            content: str = text
+        else:
+            content = base64.b64encode(data).decode("ascii")
+        return {
+            "path": path,
+            "size": len(data),
+            "mime": mime,
+            "encoding": encoding,
+            "content": content,
+        }
+
+    return await _logged("read_file", session_id, op, path=path, encoding=encoding)
 
 
 @mcp.tool(
@@ -142,10 +180,7 @@ async def list_files(
     session_id: Annotated[str, Field(description="Backend-chosen session id.")],
 ) -> dict[str, object]:
     """List current workspace files and whether the Python kernel is alive."""
-    try:
-        return await get_session(session_id)
-    except SandboxOpError as error:
-        _raise(error)
+    return await _logged("list_files", session_id, lambda: get_session(session_id))
 
 
 @mcp.tool(
@@ -156,10 +191,7 @@ async def delete_session(
     session_id: Annotated[str, Field(description="Backend-chosen session id.")],
 ) -> dict[str, bool]:
     """Kill the kernel and wipe the workspace for this session."""
-    try:
-        return await delete_session_op(session_id)
-    except SandboxOpError as error:
-        _raise(error)
+    return await _logged("delete_session", session_id, lambda: delete_session_op(session_id))
 
 
 def make_mcp_app():

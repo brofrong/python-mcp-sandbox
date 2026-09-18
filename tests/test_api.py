@@ -344,6 +344,57 @@ class SandboxApiTest(unittest.TestCase):
         self.assertIn("ok", body["stdout"])
         self.assertTrue(any(item["path"] == "report.txt" for item in body["files"]))
 
+    def test_api_logs_successful_call(self) -> None:
+        with self.assertLogs("sandbox.api", level="INFO") as captured:
+            response = self.client.get("/v1/sessions/api-log-ok", headers=AUTH)
+        self.assertEqual(response.status_code, 200)
+        messages = "\n".join(captured.output)
+        self.assertIn("api list_files start session_id=api-log-ok", messages)
+        self.assertIn("api list_files ok session_id=api-log-ok", messages)
+
+    def test_api_logs_op_error(self) -> None:
+        with self.assertLogs("sandbox.api", level="WARNING") as captured:
+            response = self.client.put(
+                "/v1/sessions/%2e%2e/files/x.txt",
+                content=b"nope",
+                headers=AUTH,
+            )
+        self.assertEqual(response.status_code, 400)
+        messages = "\n".join(captured.output)
+        self.assertIn("api write_file failed session_id=", messages)
+        self.assertIn("invalid session id", messages)
+
+    def test_api_logs_execute_runtime_error(self) -> None:
+        with self.assertLogs("sandbox.api", level="WARNING") as captured:
+            response = self.client.post(
+                "/v1/sessions/api-log-exec-fail/execute",
+                headers=AUTH,
+                json={"code": "raise RuntimeError('nope')"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertNotEqual(response.json()["exitCode"], 0)
+        messages = "\n".join(captured.output)
+        self.assertIn("api execute error session_id=api-log-exec-fail", messages)
+        self.assertIn("exitCode=", messages)
+
+    def test_api_logs_unexpected_exception(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        with patch(
+            "sandbox.main.execute_op",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            with self.assertLogs("sandbox.api", level="ERROR") as captured:
+                with self.assertRaises(RuntimeError):
+                    self.client.post(
+                        "/v1/sessions/api-log-crash/execute",
+                        headers=AUTH,
+                        json={"code": "print(1)"},
+                    )
+        messages = "\n".join(captured.output)
+        self.assertIn("api execute crashed session_id=api-log-crash", messages)
+        self.assertIn("boom", messages)
+
     def test_mcp_requires_bearer(self) -> None:
         response = self.client.post("/mcp")
         self.assertEqual(response.status_code, 401)
@@ -444,6 +495,86 @@ class SandboxMcpTest(unittest.IsolatedAsyncioTestCase):
                 },
             )
             self.assertTrue(result.is_error)
+
+    async def test_mcp_logs_successful_call(self) -> None:
+        from mcp import Client
+
+        from sandbox.mcp_server import mcp
+
+        with self.assertLogs("sandbox.mcp", level="INFO") as captured:
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "list_files",
+                    {"session_id": "mcp-log-ok"},
+                )
+        self.assertFalse(result.is_error)
+        messages = "\n".join(captured.output)
+        self.assertIn("mcp list_files start session_id=mcp-log-ok", messages)
+        self.assertIn("mcp list_files ok session_id=mcp-log-ok", messages)
+
+    async def test_mcp_logs_tool_error(self) -> None:
+        from mcp import Client
+
+        from sandbox.mcp_server import mcp
+
+        with self.assertLogs("sandbox.mcp", level="WARNING") as captured:
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "write_file",
+                    {
+                        "session_id": "mcp-log-fail",
+                        "path": "../secret.txt",
+                        "content": "nope",
+                    },
+                )
+        self.assertTrue(result.is_error)
+        messages = "\n".join(captured.output)
+        self.assertIn("mcp write_file failed session_id=mcp-log-fail", messages)
+        self.assertIn("invalid path", messages)
+
+    async def test_mcp_logs_execute_runtime_error(self) -> None:
+        from mcp import Client
+
+        from sandbox.mcp_server import mcp
+
+        with self.assertLogs("sandbox.mcp", level="WARNING") as captured:
+            async with Client(mcp) as client:
+                result = await client.call_tool(
+                    "execute",
+                    {
+                        "session_id": "mcp-log-exec-fail",
+                        "code": "raise RuntimeError('nope')",
+                    },
+                )
+        self.assertFalse(result.is_error)
+        body = result.structured_content
+        self.assertIsNotNone(body)
+        self.assertNotEqual(body["exitCode"], 0)
+        messages = "\n".join(captured.output)
+        self.assertIn("mcp execute error session_id=mcp-log-exec-fail", messages)
+        self.assertIn("exitCode=", messages)
+
+    async def test_mcp_logs_unexpected_exception(self) -> None:
+        from unittest.mock import AsyncMock, patch
+
+        from mcp import Client
+
+        from sandbox.mcp_server import mcp
+
+        with patch(
+            "sandbox.mcp_server.execute_op",
+            AsyncMock(side_effect=RuntimeError("boom")),
+        ):
+            with self.assertLogs("sandbox.mcp", level="ERROR") as captured:
+                async with Client(mcp) as client:
+                    result = await client.call_tool(
+                        "execute",
+                        {"session_id": "mcp-log-crash", "code": "print(1)"},
+                    )
+        self.assertTrue(result.is_error)
+        messages = "\n".join(captured.output)
+        self.assertIn("mcp execute crashed session_id=mcp-log-crash", messages)
+        self.assertIn("boom", messages)
 
 
 class SandboxReapTest(unittest.IsolatedAsyncioTestCase):

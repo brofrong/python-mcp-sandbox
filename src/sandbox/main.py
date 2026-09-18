@@ -10,6 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from sandbox.auth_asgi import BearerAuthASGI, init_bearer_secret
+from sandbox.call_log import configure_logger, logged_call
 from sandbox.mcp_server import make_mcp_app, mcp
 from sandbox.ops import (
     DEFAULT_TIMEOUT_MS,
@@ -25,6 +26,7 @@ from sandbox.ops import (
 )
 from sandbox.paths import MAX_FILE_BYTES
 
+logger = configure_logger("sandbox.api")
 mcp_asgi = make_mcp_app()
 
 
@@ -101,7 +103,13 @@ async def health() -> dict[str, bool]:
 @fastapi_app.get("/v1/sessions/{session_id}")
 async def get_session_route(session_id: str) -> dict[str, object]:
     try:
-        return await get_session(session_id)
+        return await logged_call(
+            logger,
+            "api",
+            "list_files",
+            session_id,
+            lambda: get_session(session_id),
+        )
     except SandboxOpError as error:
         raise_op(error)
 
@@ -113,9 +121,19 @@ async def put_file_route(
     request: Request,
     content_type: str | None = Header(default=None, alias="Content-Type"),
 ) -> dict[str, object]:
-    try:
+    async def op() -> dict[str, object]:
         body = await read_body_capped(request, MAX_FILE_BYTES)
         return await put_file(session_id, file_path, body, content_type)
+
+    try:
+        return await logged_call(
+            logger,
+            "api",
+            "write_file",
+            session_id,
+            op,
+            path=file_path,
+        )
     except SandboxOpError as error:
         raise_op(error)
 
@@ -123,7 +141,14 @@ async def put_file_route(
 @fastapi_app.get("/v1/sessions/{session_id}/files/{file_path:path}")
 async def get_file_route(session_id: str, file_path: str) -> Response:
     try:
-        data, mime = await get_file_op(session_id, file_path)
+        data, mime = await logged_call(
+            logger,
+            "api",
+            "read_file",
+            session_id,
+            lambda: get_file_op(session_id, file_path),
+            path=file_path,
+        )
     except SandboxOpError as error:
         raise_op(error)
     return Response(content=data, media_type=mime)
@@ -132,7 +157,15 @@ async def get_file_route(session_id: str, file_path: str) -> Response:
 @fastapi_app.post("/v1/sessions/{session_id}/execute")
 async def execute_route(session_id: str, body: ExecuteBody) -> dict[str, object]:
     try:
-        return await execute_op(session_id, body.code, body.timeoutMs)
+        return await logged_call(
+            logger,
+            "api",
+            "execute",
+            session_id,
+            lambda: execute_op(session_id, body.code, body.timeoutMs),
+            code_chars=len(body.code),
+            timeout_ms=body.timeoutMs,
+        )
     except SandboxOpError as error:
         raise_op(error)
 
@@ -140,7 +173,13 @@ async def execute_route(session_id: str, body: ExecuteBody) -> dict[str, object]
 @fastapi_app.delete("/v1/sessions/{session_id}")
 async def delete_session_route(session_id: str) -> dict[str, bool]:
     try:
-        return await delete_session_op(session_id)
+        return await logged_call(
+            logger,
+            "api",
+            "delete_session",
+            session_id,
+            lambda: delete_session_op(session_id),
+        )
     except SandboxOpError as error:
         raise_op(error)
 
