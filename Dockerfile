@@ -1,18 +1,75 @@
-FROM python:3.14-slim
+ARG PYTHON_VERSION=3.14
+FROM python:${PYTHON_VERSION}-slim
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends pandoc \
+  && apt-get install -y --no-install-recommends pandoc ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
+ARG FLAVOR=small
+
+RUN if [ "$FLAVOR" = "gpt" ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        tesseract-ocr \
+        poppler-utils \
+        libcairo2 \
+        libcairo2-dev \
+        libpango-1.0-0 \
+        libpangocairo-1.0-0 \
+        libpangoft2-1.0-0 \
+        libgdk-pixbuf-2.0-0 \
+        libffi-dev \
+        shared-mime-info \
+        libsndfile1 \
+        libgl1 \
+        libglib2.0-0 \
+        libzbar0 \
+        graphviz \
+        libgraphviz-dev \
+        pkg-config \
+        gcc \
+        g++ \
+        gfortran \
+        cmake \
+        libopenblas-dev \
+        liblapack-dev \
+        libhdf5-dev \
+        default-jre-headless \
+        fonts-liberation \
+        fonts-dejavu-core \
+        git \
+        libxml2 \
+        libxslt1.1 \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-server.txt requirements-small.txt requirements-gpt.txt ./
+
+RUN pip install --no-cache-dir -r requirements-server.txt
+
+RUN case "$FLAVOR" in \
+      zero) ;; \
+      small) \
+        pip install --no-cache-dir -r requirements-small.txt ;; \
+      gpt) \
+        pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+          torch torchaudio torchvision \
+        && pip freeze | grep -E '^(torch|torchaudio|torchvision)==' > /tmp/torch.constraints \
+        && pip install --no-cache-dir --prefer-binary \
+             -c /tmp/torch.constraints \
+             -r requirements-gpt.txt ;; \
+      *) echo "unknown FLAVOR=$FLAVOR (expected zero|small|gpt)" >&2; exit 1 ;; \
+    esac \
+  && pip install --no-cache-dir -r requirements-server.txt
 
 COPY src ./src
 ENV PYTHONPATH=/app/src
 ENV SANDBOX_DATA=/data
 ENV SANDBOX_REQUIRE_ISOLATION=1
 ENV MPLBACKEND=Agg
+ENV SANDBOX_FLAVOR=${FLAVOR}
 
 RUN useradd --create-home --uid 1000 sandbox \
   && mkdir -p /data \

@@ -33,15 +33,33 @@ This repo is that runtime as an HTTP + MCP service. Point any agent at it (Curso
 
 One container = one backend. Do not share an instance across untrusted services.
 
+## Image flavors
+
+Published to `ghcr.io/brofrong/python-mcp-sandbox`. Sandbox libraries are unpinned (`latest` on PyPI at build time). There is no internet and no `pip` inside the jail — pick the flavor that matches what the model is allowed to import.
+
+| Tag | Sandbox libraries | Typical use |
+| --- | --- | --- |
+| `zero` | none (Python stdlib only) | smallest image, no data-science stack |
+| `small` | openpyxl, python-docx, reportlab, python-pptx, pandas, pypandoc, numpy, matplotlib | default; also tagged `latest` |
+| `gpt` | ChatGPT-style scientific stack (pandas, scipy, sklearn, torch **CPU**, jax, opencv, spacy, geo, audio, CAD, …) | amd64 only; much larger |
+
+```bash
+docker build -t python-mcp-sandbox:small --build-arg FLAVOR=small .
+docker build -t python-mcp-sandbox:zero --build-arg FLAVOR=zero .
+docker build -t python-mcp-sandbox:gpt --build-arg FLAVOR=gpt .
+```
+
+`gpt` needs extra RAM for PyTorch/JAX (compose: `SANDBOX_MEM_LIMIT=8g`, `SANDBOX_MEMORY_BYTES=2147483648`). Compose flavor: `SANDBOX_FLAVOR=gpt`.
+
 ## Quick start
 
 ```bash
-docker build -t python-mcp-sandbox .
+docker build -t python-mcp-sandbox:small --build-arg FLAVOR=small .
 docker run -d --name sandbox \
   -p 127.0.0.1:8090:8090 \
   -e SANDBOX_SECRET=change-me \
   -v sandbox-data:/data \
-  python-mcp-sandbox
+  python-mcp-sandbox:small
 ```
 
 The process **will not start** without `SANDBOX_SECRET`.
@@ -57,7 +75,7 @@ curl -s -X POST http://localhost:8090/v1/sessions/demo/execute \
   -d '{"code":"print(2 + 2)"}'
 ```
 
-Locally, without Docker:
+Locally, without Docker (`requirements.txt` = server + `small` libraries):
 
 ```bash
 python -m venv .venv
@@ -67,6 +85,8 @@ export SANDBOX_SECRET=change-me
 export SANDBOX_DATA=./data
 PYTHONPATH=src uvicorn sandbox.main:app --host 127.0.0.1 --port 8090
 ```
+
+Server-only (stdlib sandbox, like `zero`): `pip install -r requirements-server.txt`.
 
 Linux network isolation (`unshare(CLONE_NEWNET)`) only applies inside the Docker image / a Linux host. macOS local runs still execute code in a worker process with CPU/RSS limits, but without a network namespace.
 
@@ -136,7 +156,13 @@ Authorization: Bearer $SANDBOX_SECRET
 
 ## Preinstalled libraries
 
-There is no internet and no `pip` inside the jail. These packages are baked into the image:
+There is no internet and no `pip` inside the jail. What user code can import depends on the image flavor.
+
+### `zero`
+
+CPython stdlib only.
+
+### `small` (default / `latest`)
 
 | Format / job | Package | Import |
 | --- | --- | --- |
@@ -148,7 +174,13 @@ There is no internet and no `pip` inside the jail. These packages are baked into
 | Markdown / text | pypandoc (+ system pandoc) | `import pypandoc` |
 | Plots / arrays | matplotlib, numpy | `import matplotlib.pyplot as plt`, `import numpy as np` |
 
-After changing `requirements.txt`, rebuild the image.
+### `gpt`
+
+ChatGPT Code Interpreter–style stack from `requirements-gpt.txt` (latest compatible versions at build). Highlights: numpy/pandas/scipy, sklearn, matplotlib/seaborn/plotly, pillow/opencv, torch CPU + jax, keras, spacy/nltk, geopandas, librosa, PyMuPDF/pdfplumber, cadquery, rdkit, and the usual office libraries.
+
+Omitted from the ChatGPT freeze: CUDA wheels, Jupyter, GUI automation, Playwright, OpenAI-internal packages, pytest/APM. Torch is the official CPU build.
+
+After changing `requirements-*.txt`, rebuild the matching flavor.
 
 ## Limits
 
@@ -203,7 +235,7 @@ You are integrating a backend with an existing Docker Python sandbox. The sandbo
 
 ## Deploy
 
-- Image: `docker build -t python-mcp-sandbox .`
+- Image: `docker build -t python-mcp-sandbox:small --build-arg FLAVOR=small .` (or pull `ghcr.io/brofrong/python-mcp-sandbox:small`; tags `zero` / `small` / `gpt`, `latest` = `small`)
 - Run one container PER backend:
 
 ```bash
@@ -211,7 +243,7 @@ docker run -d --name sandbox \
   -p 127.0.0.1:8090:8090 \
   -e SANDBOX_SECRET=<long random secret> \
   -v sandbox-data:/data \
-  python-mcp-sandbox
+  python-mcp-sandbox:small
 ```
 
 - Local: `SANDBOX_URL=http://localhost:8090`. In compose/k8s: `SANDBOX_URL=http://sandbox:8090`.
@@ -246,7 +278,7 @@ Python in the sandbox has no outbound network. Files enter only via PUT / `write
 
 - cwd is `/workspace`; uploads are `/workspace/uploads/`
 - write results into `/workspace`; they come back as download URLs from OUR backend
-- installed packages only: openpyxl, python-docx, reportlab, python-pptx, pandas, pypandoc, matplotlib, numpy
+- installed packages depend on the image flavor (`zero` = stdlib; `small` = openpyxl, python-docx, reportlab, python-pptx, pandas, pypandoc, matplotlib, numpy; `gpt` = ChatGPT-style scientific stack including scipy/sklearn/torch CPU)
 - do not import anything else; there is no pip and no internet
 
 Backend loop: rehydrate files if needed → POST execute → GET each new file into OUR blob store → return stdout/stderr/exitCode plus `{ name, url, path, mime, size }` → persist those URLs on the chat message.

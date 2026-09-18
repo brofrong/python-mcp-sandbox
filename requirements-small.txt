@@ -1,0 +1,9 @@
+# Sandbox libraries for the `small` image. Unpinned → latest compatible.
+openpyxl
+python-docx
+reportlab
+python-pptx
+pandas
+pypandoc
+numpy
+matplotlib

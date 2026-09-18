@@ -27,7 +27,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-server.txt
 
       - name: Run tests
         env:
@@ -42,6 +42,21 @@ jobs:
       packages: write
       attestations: write
       id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - flavor: zero
+            python_version: "3.14"
+            platforms: linux/amd64,linux/arm64
+          - flavor: small
+            python_version: "3.14"
+            platforms: linux/amd64,linux/arm64
+          - flavor: gpt
+            python_version: "3.14"
+            platforms: linux/amd64
+    # gpt image is large; only build it on main / tags.
+    if: github.event_name != 'pull_request' || matrix.flavor != 'gpt'
 
     steps:
       - name: Checkout repository
@@ -66,11 +81,15 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,prefix=sha-
-            type=semver,pattern={{version}}
-            type=ref,event=pr
+            type=raw,value=${{ matrix.flavor }}
+            type=raw,value=latest,enable=${{ matrix.flavor == 'small' && github.event_name != 'pull_request' }}
+            type=sha,prefix=${{ matrix.flavor }}-sha-
+            type=semver,pattern={{version}},prefix=${{ matrix.flavor }}-
+            type=semver,pattern={{version}},enable=${{ matrix.flavor == 'small' }}
+            type=ref,event=pr,prefix=${{ matrix.flavor }}-
 
       - name: Build and push Docker image
         id: push
@@ -78,12 +97,15 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ matrix.platforms }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            FLAVOR=${{ matrix.flavor }}
+            PYTHON_VERSION=${{ matrix.python_version }}
+          cache-from: type=gha,scope=${{ matrix.flavor }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.flavor }}
 
       - name: Generate artifact attestation
         if: github.event_name != 'pull_request'

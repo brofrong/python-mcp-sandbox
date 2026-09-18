@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -57,6 +58,26 @@ class IsolationRequiredTest(unittest.TestCase):
                 os.environ.pop("SANDBOX_REQUIRE_ISOLATION", None)
             else:
                 os.environ["SANDBOX_REQUIRE_ISOLATION"] = original
+
+
+class NprocClampTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux", "RLIMIT_NPROC clamp is Linux-only")
+    def test_clamp_nproc_still_allows_fork(self) -> None:
+        import resource
+
+        from sandbox.isolate import clamp_nproc
+
+        original = resource.getrlimit(resource.RLIMIT_NPROC)
+        try:
+            clamp_nproc(1)
+            clamp_nproc(256)
+            pid = os.fork()
+            if pid == 0:
+                os._exit(0)
+            waited, _status = os.waitpid(pid, 0)
+            self.assertEqual(waited, pid)
+        finally:
+            resource.setrlimit(resource.RLIMIT_NPROC, original)
 
 
 class WorkerEnvTest(unittest.TestCase):

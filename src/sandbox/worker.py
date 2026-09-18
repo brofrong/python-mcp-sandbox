@@ -14,7 +14,7 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
-from sandbox.isolate import IsolationError, isolate_self
+from sandbox.isolate import IsolationError, clamp_nproc, isolate_self
 
 os.environ.pop("SANDBOX_SECRET", None)
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -192,17 +192,6 @@ def _reap_children(_signum: int = 0, _frame: object = None) -> None:
             return
 
 
-def _clamp_nproc(max_procs: int) -> None:
-    if sys.platform != "linux":
-        return
-    try:
-        import resource
-
-        resource.setrlimit(resource.RLIMIT_NPROC, (max_procs, max_procs))
-    except (ImportError, ValueError, OSError):
-        return
-
-
 def _kernel_main(conn: socket.socket, *, apply_isolation: bool) -> None:
     if apply_isolation:
         isolate_self(WORKSPACE)
@@ -238,10 +227,14 @@ def _kernel_exec(conn: socket.socket, code: str) -> None:
 
 
 def _exec_child(remote: socket.socket, code: str) -> None:
-    _clamp_nproc(1)
+    clamp_nproc(1)
     result = _exec(code)
-    _clamp_nproc(256)
-    pid = os.fork()
+    clamp_nproc(256)
+    try:
+        pid = os.fork()
+    except OSError:
+        _send_msg(remote, {"ok": True, **result})
+        return
     if pid != 0:
         os._exit(0)
     _send_msg(remote, {"ok": True, **result})

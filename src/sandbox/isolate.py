@@ -144,6 +144,24 @@ def _apply_rlimits() -> None:
         return
 
 
+def clamp_nproc(max_procs: int) -> None:
+    """Lower only the soft nproc limit so it can be raised again after exec.
+
+    Setting the hard limit to 1 is irreversible for an unprivileged process,
+    so the post-exec fork that becomes the next kernel would fail with EAGAIN.
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        import resource
+
+        _soft, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+        cap = max_procs if hard == resource.RLIM_INFINITY else min(max_procs, hard)
+        resource.setrlimit(resource.RLIMIT_NPROC, (cap, hard))
+    except (ImportError, ValueError, OSError):
+        return
+
+
 def _unshare_net() -> bool:
     newuser = getattr(os, "CLONE_NEWUSER", 0x10000000)
     newnet = getattr(os, "CLONE_NEWNET", 0x40000000)

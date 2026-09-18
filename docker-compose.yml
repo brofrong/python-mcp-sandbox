@@ -3,8 +3,11 @@
 
 services:
   sandbox:
-    build: .
-    image: python-mcp-sandbox
+    build:
+      context: .
+      args:
+        FLAVOR: ${SANDBOX_FLAVOR:-small}
+    image: python-mcp-sandbox:${SANDBOX_FLAVOR:-small}
     container_name: sandbox
     user: "1000:1000"
     init: true
@@ -33,7 +36,8 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 256
-    mem_limit: 4g
+    # gpt flavor needs more: SANDBOX_MEM_LIMIT=8g SANDBOX_MEMORY_BYTES=2147483648
+    mem_limit: ${SANDBOX_MEM_LIMIT:-4g}
     cpus: "2.0"
     ulimits:
       core: 0
