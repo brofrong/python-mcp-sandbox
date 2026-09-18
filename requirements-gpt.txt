@@ -164,7 +164,6 @@ geopy
 shapely
 pyproj
 rasterio
-fiona
 pyogrio
 pyshp
 geographiclib

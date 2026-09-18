@@ -43,32 +43,54 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            include='[{"flavor":"zero","python_version":"3.14","platforms":"linux/amd64,linux/arm64"},{"flavor":"small","python_version":"3.14","platforms":"linux/amd64,linux/arm64"}]'
-          else
-            include='[{"flavor":"zero","python_version":"3.14","platforms":"linux/amd64,linux/arm64"},{"flavor":"small","python_version":"3.14","platforms":"linux/amd64,linux/arm64"},{"flavor":"gpt","python_version":"3.14","platforms":"linux/amd64"}]'
-          fi
-          echo "include=$include" >> "$GITHUB_OUTPUT"
+          python3 <<'PY'
+          import json
+          import os
 
-  build-and-push:
+          flavors = ["zero", "small"]
+          if os.environ["EVENT_NAME"] != "pull_request":
+              flavors.append("gpt")
+          rows = []
+          for flavor in flavors:
+              rows.append(
+                  {
+                      "flavor": flavor,
+                      "python_version": "3.14",
+                      "platform": "linux/amd64",
+                      "runner": "ubuntu-latest",
+                  }
+              )
+              if flavor != "gpt":
+                  rows.append(
+                      {
+                          "flavor": flavor,
+                          "python_version": "3.14",
+                          "platform": "linux/arm64",
+                          "runner": "ubuntu-24.04-arm",
+                      }
+                  )
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("include=" + json.dumps(rows, separators=(",", ":")) + "\n")
+          PY
+
+  build:
     needs: [test, flavors]
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
-      attestations: write
-      id-token: write
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.flavors.outputs.include) }}
-
     steps:
+      - name: Prepare
+        run: |
+          platform="${{ matrix.platform }}"
+          echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
+
       - name: Checkout repository
         uses: actions/checkout@v6
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -88,34 +110,100 @@ jobs:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           flavor: |
             latest=false
-          tags: |
-            type=raw,value=${{ matrix.flavor }}
-            type=raw,value=latest,enable=${{ matrix.flavor == 'small' && github.event_name != 'pull_request' }}
-            type=sha,prefix=${{ matrix.flavor }}-sha-
-            type=semver,pattern={{version}},prefix=${{ matrix.flavor }}-
-            type=semver,pattern={{version}},enable=${{ matrix.flavor == 'small' }}
-            type=ref,event=pr,prefix=${{ matrix.flavor }}-
 
-      - name: Build and push Docker image
-        id: push
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
-          platforms: ${{ matrix.platforms }}
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
+          platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             FLAVOR=${{ matrix.flavor }}
             PYTHON_VERSION=${{ matrix.python_version }}
-          cache-from: type=gha,scope=${{ matrix.flavor }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.flavor }}
+          cache-from: type=gha,scope=${{ matrix.flavor }}-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.flavor }}-${{ env.PLATFORM_PAIR }}
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.flavor }}-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [flavors, build]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [zero, small, gpt]
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.flavor }}-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
+          tags: |
+            type=raw,value=${{ matrix.flavor }}
+            type=raw,value=latest,enable=${{ matrix.flavor == 'small' }}
+            type=sha,prefix=${{ matrix.flavor }}-sha-
+            type=semver,pattern={{version}},prefix=${{ matrix.flavor }}-
+            type=semver,pattern={{version}},enable=${{ matrix.flavor == 'small' }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
+
+      - name: Inspect image
+        id: inspect
+        run: |
+          digest="$(docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.flavor }}" | awk '/^Digest:/{print $2; exit}')"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Generate artifact attestation
-        if: github.event_name != 'pull_request'
         uses: actions/attest@v4
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-digest: ${{ steps.inspect.outputs.digest }}
           push-to-registry: true
