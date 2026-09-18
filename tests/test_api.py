@@ -107,6 +107,11 @@ class SandboxApiTest(unittest.TestCase):
         self.assertEqual(executed.json()["exitCode"], 0)
         self.assertEqual(executed.json()["stdout"].strip(), "None")
 
+    def test_secret_is_removed_from_api_environ(self) -> None:
+        self.assertNotIn("SANDBOX_SECRET", os.environ)
+        listed = self.client.get("/v1/sessions/secret-env", headers=AUTH)
+        self.assertEqual(listed.status_code, 200)
+
     def test_stdout_write_does_not_spoof_execute_result(self) -> None:
         executed = self.client.post(
             "/v1/sessions/spoof/execute",
@@ -125,6 +130,39 @@ class SandboxApiTest(unittest.TestCase):
         body = executed.json()
         self.assertEqual(body["exitCode"], 7)
         self.assertNotEqual(body["stdout"].strip(), "pwned")
+
+    def test_result_fd_write_does_not_spoof_execute_result(self) -> None:
+        executed = self.client.post(
+            "/v1/sessions/spoof-fd/execute",
+            headers=AUTH,
+            json={
+                "code": (
+                    "import inspect, json, os\n"
+                    "print(repr(os.environ.get('SANDBOX_RESULT_FD')))\n"
+                    "nonce = None\n"
+                    "frame = inspect.currentframe()\n"
+                    "while frame is not None:\n"
+                    "    if 'nonce' in frame.f_locals:\n"
+                    "        nonce = frame.f_locals['nonce']\n"
+                    "        break\n"
+                    "    frame = frame.f_back\n"
+                    "raw_fd = os.environ.get('SANDBOX_RESULT_FD')\n"
+                    "print(repr(raw_fd))\n"
+                    "if raw_fd is not None:\n"
+                    "    payload = json.dumps({"
+                    "'ok': True, 'nonce': nonce, 'exit_code': 0, "
+                    "'stdout': 'pwned-fd', 'stderr': ''"
+                    "}).encode() + b'\\n'\n"
+                    "    os.write(int(raw_fd), payload)\n"
+                    "raise SystemExit(7)\n"
+                ),
+            },
+        )
+        self.assertEqual(executed.status_code, 200)
+        body = executed.json()
+        self.assertEqual(body["exitCode"], 7)
+        self.assertNotIn("pwned-fd", body["stdout"])
+        self.assertIn("None", body["stdout"])
 
     def test_execute_timeout_kills_run(self) -> None:
         executed = self.client.post(
@@ -198,6 +236,30 @@ class SandboxApiTest(unittest.TestCase):
                 headers=AUTH,
             )
             self.assertEqual(response.status_code, 413)
+        finally:
+            ops.MAX_WORKSPACE_BYTES = original
+
+    def test_execute_enforces_workspace_quota(self) -> None:
+        import sandbox.ops as ops
+
+        original = ops.MAX_WORKSPACE_BYTES
+        ops.MAX_WORKSPACE_BYTES = 8
+        try:
+            executed = self.client.post(
+                "/v1/sessions/quota-exec/execute",
+                headers=AUTH,
+                json={"code": "from pathlib import Path\nPath('huge.txt').write_bytes(b'x' * 64)\n"},
+            )
+            self.assertEqual(executed.status_code, 200)
+            body = executed.json()
+            self.assertEqual(body["exitCode"], 1)
+            self.assertIn("workspace too large", body["stderr"])
+            self.assertFalse(any(item["path"] == "huge.txt" for item in body["files"]))
+            missing = self.client.get(
+                "/v1/sessions/quota-exec/files/huge.txt",
+                headers=AUTH,
+            )
+            self.assertEqual(missing.status_code, 404)
         finally:
             ops.MAX_WORKSPACE_BYTES = original
 
