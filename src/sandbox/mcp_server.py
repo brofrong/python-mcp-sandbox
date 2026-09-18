@@ -9,11 +9,11 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from sandbox.auth_asgi import BearerAuthASGI
 from sandbox.ops import (
     DEFAULT_TIMEOUT_MS,
     MAX_CODE_CHARS,
     MAX_TIMEOUT_MS,
+    MAX_WRITE_CHARS,
     MIN_TIMEOUT_MS,
     SandboxOpError,
     delete_session as delete_session_op,
@@ -81,7 +81,14 @@ async def write_file(
         str,
         Field(description="Relative path inside the session workspace, e.g. uploads/input.csv."),
     ],
-    content: Annotated[str, Field(min_length=1, description="File bytes as utf-8 text or base64.")],
+    content: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=MAX_WRITE_CHARS,
+            description="File bytes as utf-8 text or base64.",
+        ),
+    ],
     encoding: Literal["utf-8", "base64"] = "utf-8",
     mime: str = "application/octet-stream",
 ) -> dict[str, object]:
@@ -155,8 +162,8 @@ async def delete_session(
         _raise(error)
 
 
-def make_mcp_app() -> BearerAuthASGI:
-    inner = mcp.streamable_http_app(
+def make_mcp_app():
+    return mcp.streamable_http_app(
         streamable_http_path="/",
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=False,
@@ -164,4 +171,3 @@ def make_mcp_app() -> BearerAuthASGI:
         max_request_body_size=32 * 1024 * 1024,
         stateless_http=True,
     )
-    return BearerAuthASGI(inner)

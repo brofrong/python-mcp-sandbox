@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-SESSION_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,200}$")
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,198}[A-Za-z0-9])?$")
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_WORKSPACE_BYTES = int(os.environ.get("SANDBOX_MAX_WORKSPACE_BYTES", str(200 * 1024 * 1024)))
 SKIP_DIR_NAMES = {"__pycache__", ".matplotlib", ".cache"}
@@ -41,10 +41,23 @@ def data_root() -> Path:
 def workspace_dir(session_id: str, *, create: bool = True) -> Path:
     if SESSION_ID_RE.fullmatch(session_id) is None:
         raise ValueError("invalid session id")
-    path = data_root() / "workspaces" / session_id
+    root = (data_root() / "workspaces").resolve()
+    candidate = root / session_id
+    resolved = candidate.resolve()
+    if resolved.parent != root or resolved.name != session_id:
+        raise ValueError("invalid session id")
     if create:
-        path.mkdir(parents=True, exist_ok=True)
-    return path.resolve()
+        resolved.mkdir(parents=True, exist_ok=True)
+        resolved = resolved.resolve()
+        if resolved.parent != root:
+            raise ValueError("invalid session id")
+    return resolved
+
+
+def touch_workspace(workspace: Path) -> None:
+    if not workspace.exists():
+        return
+    os.utime(workspace, None)
 
 
 def resolve_relative(workspace: Path, relative: str) -> Path:

@@ -1,0 +1,54 @@
+# Jail for untrusted Python. Do not add privileged, SYS_ADMIN, or docker.sock.
+# User code still has CPU/disk up to the quotas below; this is not gVisor/Kata.
+
+services:
+  sandbox:
+    build: .
+    image: python-mcp-sandbox
+    container_name: sandbox
+    user: "1000:1000"
+    init: true
+    privileged: false
+    read_only: true
+    ports:
+      # Host-only. Do not bind 0.0.0.0 — that publishes the jail on the LAN.
+      - "127.0.0.1:${SANDBOX_PORT:-8090}:8090"
+    environment:
+      SANDBOX_SECRET: ${SANDBOX_SECRET:?set SANDBOX_SECRET in .env}
+      SANDBOX_DATA: /data
+      SANDBOX_MAX_KERNELS: ${SANDBOX_MAX_KERNELS:-32}
+      SANDBOX_IDLE_KERNEL_SECONDS: ${SANDBOX_IDLE_KERNEL_SECONDS:-900}
+      SANDBOX_IDLE_WORKSPACE_SECONDS: ${SANDBOX_IDLE_WORKSPACE_SECONDS:-900}
+      SANDBOX_MAX_WORKSPACE_BYTES: ${SANDBOX_MAX_WORKSPACE_BYTES:-209715200}
+      SANDBOX_MEMORY_BYTES: ${SANDBOX_MEMORY_BYTES:-536870912}
+      SANDBOX_CPU_SECONDS: ${SANDBOX_CPU_SECONDS:-30}
+    volumes:
+      - sandbox-data:/data
+    tmpfs:
+      - /tmp:size=64M,mode=1777,nosuid,nodev,noexec
+      - /home/sandbox:size=16M,uid=1000,gid=1000,mode=0755,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 4g
+    cpus: "2.0"
+    ulimits:
+      core: 0
+      nofile:
+        soft: 1024
+        hard: 1024
+    networks:
+      - jail
+    restart: unless-stopped
+
+networks:
+  jail:
+    driver: bridge
+    # No default route / NAT: process cannot reach the internet or other networks.
+    # Host access remains via the published 127.0.0.1 port.
+    internal: true
+
+volumes:
+  sandbox-data:

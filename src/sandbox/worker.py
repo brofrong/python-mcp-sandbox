@@ -10,10 +10,14 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
+from sandbox.isolate import isolate_self
+
+os.environ.pop("SANDBOX_SECRET", None)
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 WORKSPACE = os.path.realpath(os.environ["SANDBOX_WORKSPACE"])
 VIRTUAL_ROOT = "/workspace"
+isolate_self(WORKSPACE)
 os.chdir(WORKSPACE)
 
 _globals: dict[str, object] = {"__name__": "__main__"}
@@ -100,22 +104,6 @@ def _install_workspace_alias() -> None:
 _install_workspace_alias()
 
 
-def _apply_rlimits() -> None:
-    try:
-        import resource
-
-        memory = int(os.environ.get("SANDBOX_MEMORY_BYTES", str(512 * 1024 * 1024)))
-        cpu = int(os.environ.get("SANDBOX_CPU_SECONDS", "30"))
-        resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
-        resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
-    except (ImportError, ValueError, OSError):
-        return
-
-
-_apply_rlimits()
-
-
 def _trim(value: str) -> str:
     if len(value) <= MAX_CAPTURE:
         return value
@@ -144,21 +132,38 @@ def _exec(code: str) -> dict[str, object]:
     }
 
 
+def _send(result_fd: int, payload: dict[str, object]) -> None:
+    data = (json.dumps(payload) + "\n").encode("utf-8")
+    view = memoryview(data)
+    while len(view) > 0:
+        written = os.write(result_fd, view)
+        view = view[written:]
+
+
 def main() -> None:
+    raw_fd = os.environ.get("SANDBOX_RESULT_FD")
+    if raw_fd is None:
+        raise SystemExit("SANDBOX_RESULT_FD is required")
+    result_fd = int(raw_fd)
     for raw in sys.stdin:
         line = raw.strip()
         if len(line) == 0:
             continue
-        message = json.loads(line)
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            _send(result_fd, {"ok": False, "error": "invalid json", "nonce": ""})
+            continue
         command = message.get("cmd")
+        nonce = str(message.get("nonce", ""))
         if command == "ping":
-            print(json.dumps({"ok": True}), flush=True)
+            _send(result_fd, {"ok": True, "nonce": nonce})
             continue
         if command == "exec":
             result = _exec(str(message.get("code", "")))
-            print(json.dumps({"ok": True, **result}), flush=True)
+            _send(result_fd, {"ok": True, "nonce": nonce, **result})
             continue
-        print(json.dumps({"ok": False, "error": "unknown command"}), flush=True)
+        _send(result_fd, {"ok": False, "error": "unknown command", "nonce": nonce})
 
 
 if __name__ == "__main__":

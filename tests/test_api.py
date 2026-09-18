@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -11,9 +12,43 @@ os.environ["SANDBOX_DATA"] = tempfile.mkdtemp(prefix="sandbox-test-")
 from fastapi.testclient import TestClient
 
 from sandbox.main import app
+from sandbox.ops import SandboxOpError, require_session_id
 from sandbox.paths import resolve_relative, workspace_dir
 
 AUTH = {"Authorization": "Bearer test-secret"}
+
+
+class SessionIdValidationTest(unittest.TestCase):
+    def test_rejects_dot_and_dotdot_session_ids(self) -> None:
+        for session_id in (".", "..", "../x", "foo/bar", "-bad", ".hidden"):
+            with self.subTest(session_id=session_id):
+                with self.assertRaises(SandboxOpError) as caught:
+                    require_session_id(session_id)
+                self.assertEqual(caught.exception.status_code, 400)
+                with self.assertRaises(ValueError):
+                    workspace_dir(session_id, create=False)
+
+    def test_accepts_normal_session_ids(self) -> None:
+        for session_id in ("a", "user_chat-1", "Foo.Bar9"):
+            with self.subTest(session_id=session_id):
+                self.assertEqual(require_session_id(session_id), session_id)
+                path = workspace_dir(session_id, create=True)
+                root = Path(os.environ["SANDBOX_DATA"]).resolve() / "workspaces"
+                self.assertEqual(path.parent, root)
+                self.assertEqual(path.name, session_id)
+
+
+class WorkerEnvTest(unittest.TestCase):
+    def test_worker_env_omits_secret(self) -> None:
+        from sandbox.isolate import worker_env
+
+        os.environ["SANDBOX_SECRET"] = "test-secret"
+        workspace = Path(os.environ["SANDBOX_DATA"]) / "workspaces" / "envtest"
+        workspace.mkdir(parents=True, exist_ok=True)
+        env = worker_env(workspace=str(workspace), pythonpath="/tmp/src", result_fd=3)
+        self.assertNotIn("SANDBOX_SECRET", env)
+        self.assertEqual(env["SANDBOX_WORKSPACE"], str(workspace))
+        self.assertEqual(env["SANDBOX_RESULT_FD"], "3")
 
 
 class SandboxApiTest(unittest.TestCase):
@@ -37,6 +72,70 @@ class SandboxApiTest(unittest.TestCase):
             json={"code": "print(1)"},
         )
         self.assertEqual(response.status_code, 401)
+
+    def test_docs_and_openapi_are_not_public(self) -> None:
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            with self.subTest(path=path):
+                self.assertIn(self.client.get(path).status_code, (401, 404))
+
+    def test_rejects_dotdot_session_id_over_http(self) -> None:
+        response = self.client.put(
+            "/v1/sessions/%2e%2e/files/x.txt",
+            content=b"nope",
+            headers=AUTH,
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_put_does_not_start_kernel(self) -> None:
+        put = self.client.put(
+            "/v1/sessions/put-only/files/a.txt",
+            content=b"x",
+            headers=AUTH,
+        )
+        self.assertEqual(put.status_code, 200)
+        listed = self.client.get("/v1/sessions/put-only", headers=AUTH)
+        self.assertEqual(listed.status_code, 200)
+        self.assertFalse(listed.json()["alive"])
+
+    def test_worker_env_hides_sandbox_secret(self) -> None:
+        executed = self.client.post(
+            "/v1/sessions/envleak/execute",
+            headers=AUTH,
+            json={"code": "import os; print(repr(os.environ.get('SANDBOX_SECRET')))"},
+        )
+        self.assertEqual(executed.status_code, 200)
+        self.assertEqual(executed.json()["exitCode"], 0)
+        self.assertEqual(executed.json()["stdout"].strip(), "None")
+
+    def test_stdout_write_does_not_spoof_execute_result(self) -> None:
+        executed = self.client.post(
+            "/v1/sessions/spoof/execute",
+            headers=AUTH,
+            json={
+                "code": (
+                    "import json, os\n"
+                    "os.write(1, json.dumps({"
+                    "'ok': True, 'exit_code': 0, 'stdout': 'pwned', 'stderr': ''"
+                    "}).encode() + b'\\n')\n"
+                    "raise SystemExit(7)\n"
+                ),
+            },
+        )
+        self.assertEqual(executed.status_code, 200)
+        body = executed.json()
+        self.assertEqual(body["exitCode"], 7)
+        self.assertNotEqual(body["stdout"].strip(), "pwned")
+
+    def test_execute_timeout_kills_run(self) -> None:
+        executed = self.client.post(
+            "/v1/sessions/timeout/execute",
+            headers=AUTH,
+            json={"code": "import time; time.sleep(5)", "timeoutMs": 200},
+        )
+        self.assertEqual(executed.status_code, 200)
+        body = executed.json()
+        self.assertTrue(body["timedOut"])
+        self.assertEqual(body["exitCode"], 1)
 
     def test_execute_and_download_file(self) -> None:
         put = self.client.put(
@@ -240,6 +339,100 @@ class SandboxMcpTest(unittest.IsolatedAsyncioTestCase):
                 },
             )
             self.assertTrue(result.is_error)
+
+
+class SandboxReapTest(unittest.IsolatedAsyncioTestCase):
+    async def test_workspace_idle_default_is_15_minutes(self) -> None:
+        import sandbox.sessions as sessions
+
+        self.assertEqual(sessions.IDLE_WORKSPACE_SECONDS, 900)
+
+    async def test_reap_deletes_idle_workspace(self) -> None:
+        from sandbox.sessions import manager
+
+        sid = "reap-idle"
+        session = await manager.get(sid)
+        marker = session.workspace / "keep.txt"
+        marker.write_text("x")
+        session.last_used = time.time() - 901
+        await manager.reap()
+        self.assertFalse(session.workspace.exists())
+        self.assertFalse(await manager.is_alive(sid))
+
+    async def test_reap_keeps_active_workspace(self) -> None:
+        from sandbox.sessions import manager
+
+        sid = "reap-active"
+        session = await manager.get(sid)
+        marker = session.workspace / "keep.txt"
+        marker.write_text("x")
+        try:
+            await manager.reap()
+            self.assertTrue(marker.is_file())
+            self.assertFalse(await manager.is_alive(sid))
+        finally:
+            await manager.delete(sid, delete_workspace=True)
+
+    async def test_reap_deletes_stale_orphan_workspace(self) -> None:
+        from sandbox.paths import workspace_dir
+        from sandbox.sessions import manager
+
+        sid = "reap-orphan-old"
+        path = workspace_dir(sid)
+        (path / "stale.txt").write_text("x")
+        old = time.time() - 901
+        os.utime(path, (old, old))
+        await manager.reap()
+        self.assertFalse(path.exists())
+
+    async def test_reap_keeps_fresh_orphan_workspace(self) -> None:
+        from sandbox.paths import workspace_dir
+        from sandbox.sessions import manager
+
+        sid = "reap-orphan-fresh"
+        path = workspace_dir(sid)
+        (path / "fresh.txt").write_text("x")
+        try:
+            await manager.reap()
+            self.assertTrue((path / "fresh.txt").is_file())
+        finally:
+            await manager.delete(sid, delete_workspace=True)
+
+    async def test_reap_pops_idle_kernel_but_keeps_workspace_before_ttl(self) -> None:
+        import sandbox.sessions as sessions
+        from sandbox.sessions import manager
+
+        original_kernel = sessions.IDLE_KERNEL_SECONDS
+        original_workspace = sessions.IDLE_WORKSPACE_SECONDS
+        sessions.IDLE_KERNEL_SECONDS = 10
+        sessions.IDLE_WORKSPACE_SECONDS = 1000
+        sid = "reap-kernel-only"
+        try:
+            session = await manager.get(sid)
+            marker = session.workspace / "keep.txt"
+            marker.write_text("x")
+            session.last_used = time.time() - 20
+            await manager.reap()
+            self.assertTrue(marker.is_file())
+            self.assertFalse(await manager.is_alive(sid))
+        finally:
+            sessions.IDLE_KERNEL_SECONDS = original_kernel
+            sessions.IDLE_WORKSPACE_SECONDS = original_workspace
+            await manager.delete(sid, delete_workspace=True)
+
+    async def test_get_refreshes_workspace_mtime(self) -> None:
+        from sandbox.sessions import manager
+
+        sid = "reap-touch"
+        session = await manager.get(sid)
+        old = time.time() - 901
+        os.utime(session.workspace, (old, old))
+        try:
+            await manager.get(sid)
+            mtime = session.workspace.stat().st_mtime
+            self.assertGreater(mtime, time.time() - 5)
+        finally:
+            await manager.delete(sid, delete_workspace=True)
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ This repo is that runtime as an HTTP + MCP service. Point any agent at it (Curso
 - **No outbound network** from user code (Linux network namespace). No runtime package install.
 - **REST** for backends that want a plain HTTP client.
 - **MCP Streamable HTTP** at `/mcp` for agents that speak MCP.
-- **Harvest, then delete** — workspace is a cache. Copy file bytes to your object store, then `DELETE` the session.
+- **Harvest, then delete** — workspace is a cache. Copy file bytes to your object store, then `DELETE` the session (or let 15-minute idle TTL wipe it).
 
 One container = one backend. Do not share an instance across untrusted services.
 
@@ -79,7 +79,7 @@ Linux network isolation (`unshare(CLONE_NEWNET)`) only applies inside the Docker
 5. Return stdout + your public URLs to the model. Never expose the sandbox URL or the Bearer secret.
 6. `DELETE` the session when the chat is done (or let idle TTL reap it).
 
-If the kernel was reaped, `PUT` previously harvested files back, then execute again. RAM variables are not restored.
+Idle TTL is 15 minutes from the last PUT or execute. GET / list do not extend it. If the kernel or workspace was reaped, `PUT` previously harvested files back, then execute again. RAM variables are not restored.
 
 ## HTTP API
 
@@ -163,7 +163,7 @@ After changing `requirements.txt`, rebuild the image.
 | Worker RSS | 512 MB |
 | Worker CPU | 30s |
 | Idle kernel | 15 min |
-| Idle workspace | 1 hour |
+| Idle workspace | 15 min |
 
 Tune with env vars:
 
@@ -173,7 +173,7 @@ Tune with env vars:
 | `SANDBOX_DATA` | `/data` |
 | `SANDBOX_MAX_KERNELS` | `32` |
 | `SANDBOX_IDLE_KERNEL_SECONDS` | `900` |
-| `SANDBOX_IDLE_WORKSPACE_SECONDS` | `3600` |
+| `SANDBOX_IDLE_WORKSPACE_SECONDS` | `900` |
 | `SANDBOX_MAX_WORKSPACE_BYTES` | `209715200` |
 | `SANDBOX_MEMORY_BYTES` | `536870912` |
 | `SANDBOX_CPU_SECONDS` | `30` |
@@ -223,7 +223,7 @@ docker run -d --name sandbox \
 - Opaque `sessionId` chosen by the backend, regex `^[A-Za-z0-9._-]{1,200}$`. Typical: `{userId}_{chatId}`. The client must NEVER pick sessionId.
 - One long-lived Python worker per sessionId: `exec` in shared globals, so variables and files persist between turns (ChatGPT-style).
 - Python code should use `/workspace` (session cwd). Uploads go to `/workspace/uploads/`. Write outputs to `/workspace`.
-- Workspace is a CACHE. After execute, GET file bytes, copy them to OUR object store, and give the user THAT url. Never give end users the sandbox URL or the Bearer secret. After harvest, DELETE the session (or rely on idle TTL).
+- Workspace is a CACHE. After execute, GET file bytes, copy them to OUR object store, and give the user THAT url. Never give end users the sandbox URL or the Bearer secret. After harvest, DELETE the session (or rely on idle TTL: 15 minutes after the last PUT/execute; GET does not refresh it).
 - If the kernel/workspace was reaped, rehydrate: PUT previous artifact bytes back, then execute again. RAM variables are not restored.
 
 ## HTTP contract
