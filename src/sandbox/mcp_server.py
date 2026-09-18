@@ -32,7 +32,7 @@ logger = configure_logger("sandbox.mcp")
 INSTRUCTIONS = """\
 Python code-execution sandbox. Each session_id is a persistent kernel + /workspace.
 cwd is /workspace. Put uploads under /workspace/uploads/. Write outputs into /workspace.
-Python has no outbound network and no pip. Installed packages: openpyxl, python-docx,
+Python has no pip. Installed packages: openpyxl, python-docx,
 reportlab, python-pptx, pandas, pypandoc, numpy, matplotlib.
 The backend chooses session_id (typically userId_chatId). After execute, harvest file
 bytes with read_file — do not treat workspace paths as public URLs.

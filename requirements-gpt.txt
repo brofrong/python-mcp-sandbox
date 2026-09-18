@@ -231,7 +231,7 @@ trame-vtk
 trame-vuetify
 wslink
 
-# IO / cloud clients (no outbound network in the jail)
+# IO / cloud clients
 boto3
 botocore
 s3transfer

@@ -71,8 +71,8 @@ def isolation_required() -> bool:
     """Fail closed only when explicitly requested.
 
     Docker sets SANDBOX_REQUIRE_ISOLATION=1. Unit tests and a native
-    Linux run (GitHub Actions, local uvicorn) often cannot unshare a
-    user/net namespace, so the default is best-effort isolation.
+    Linux run (GitHub Actions, local uvicorn) often cannot apply
+    Landlock, so the default is best-effort isolation.
     """
     flag = os.environ.get("SANDBOX_REQUIRE_ISOLATION")
     if flag is None:
@@ -118,8 +118,6 @@ def isolate_self(workspace: str) -> None:
     os.environ.pop("SANDBOX_SECRET", None)
     required = isolation_required()
     if sys.platform == "linux":
-        if not _unshare_net() and required:
-            raise IsolationError("network unshare failed")
         # Landlock paths are the Docker jail layout. Applying them on a
         # GitHub Actions / native host hides /proc and misses toolcache
         # paths, so only enforce that filesystem policy when required.
@@ -160,24 +158,6 @@ def clamp_nproc(max_procs: int) -> None:
         resource.setrlimit(resource.RLIMIT_NPROC, (cap, hard))
     except (ImportError, ValueError, OSError):
         return
-
-
-def _unshare_net() -> bool:
-    newuser = getattr(os, "CLONE_NEWUSER", 0x10000000)
-    newnet = getattr(os, "CLONE_NEWNET", 0x40000000)
-    uid = os.getuid()
-    gid = os.getgid()
-    try:
-        os.unshare(newuser | newnet)
-    except (AttributeError, OSError):
-        return False
-    try:
-        Path("/proc/self/setgroups").write_text("deny")
-        Path("/proc/self/uid_map").write_text(f"{uid} {uid} 1")
-        Path("/proc/self/gid_map").write_text(f"{gid} {gid} 1")
-    except OSError:
-        return False
-    return True
 
 
 def _landlock(workspace: str) -> bool:

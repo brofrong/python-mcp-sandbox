@@ -2,7 +2,7 @@
 
 A **ChatGPT-style Python code interpreter** you can run next to your own backend.
 
-The model writes Python. This service runs it in a jail: persistent kernel, `/workspace` files, no internet, no `pip`. You get stdout, stderr, and the files the code created — same loop as Advanced Data Analysis / Code Interpreter in ChatGPT, but as a standalone Docker service.
+The model writes Python. This service runs it in a jail: persistent kernel, `/workspace` files, no `pip`. You get stdout, stderr, and the files the code created — same loop as Advanced Data Analysis / Code Interpreter in ChatGPT, but as a standalone Docker service.
 
 It does **not** talk to OpenAI, OpenRouter, or your users. It only executes code. Your backend owns sessions, auth, and download URLs.
 
@@ -26,7 +26,7 @@ This repo is that runtime as an HTTP + MCP service. Point any agent at it (Curso
 
 - **Persistent session** — one Python worker per `sessionId` (`userId_chatId` is a typical choice). `exec` runs in shared globals.
 - **Virtual cwd `/workspace`** — uploads under `/workspace/uploads/`, outputs written into `/workspace`.
-- **No outbound network** from user code (Linux network namespace). No runtime package install.
+- **No runtime package install.** Packages are baked into the image flavor; there is no `pip` in the jail.
 - **REST** for backends that want a plain HTTP client.
 - **MCP Streamable HTTP** at `/mcp` for agents that speak MCP.
 - **Harvest, then delete** — workspace is a cache. Copy file bytes to your object store, then `DELETE` the session (or let 15-minute idle TTL wipe it).
@@ -35,7 +35,7 @@ One container = one backend. Do not share an instance across untrusted services.
 
 ## Image flavors
 
-Published to `ghcr.io/brofrong/python-mcp-sandbox`. Sandbox libraries are unpinned (`latest` on PyPI at build time). There is no internet and no `pip` inside the jail — pick the flavor that matches what the model is allowed to import.
+Published to `ghcr.io/brofrong/python-mcp-sandbox`. Sandbox libraries are unpinned (`latest` on PyPI at build time). There is no `pip` inside the jail — pick the flavor that matches what the model is allowed to import.
 
 | Tag | Sandbox libraries | Typical use |
 | --- | --- | --- |
@@ -87,8 +87,6 @@ PYTHONPATH=src uvicorn sandbox.main:app --host 127.0.0.1 --port 8090
 ```
 
 Server-only (stdlib sandbox, like `zero`): `pip install -r requirements-server.txt`.
-
-Linux network isolation (`unshare(CLONE_NEWNET)`) only applies inside the Docker image / a Linux host. macOS local runs still execute code in a worker process with CPU/RSS limits, but without a network namespace.
 
 ## Typical backend loop
 
@@ -156,7 +154,7 @@ Authorization: Bearer $SANDBOX_SECRET
 
 ## Preinstalled libraries
 
-There is no internet and no `pip` inside the jail. What user code can import depends on the image flavor.
+There is no `pip` inside the jail. What user code can import depends on the image flavor.
 
 ### `zero`
 
@@ -216,7 +214,7 @@ This is a **code jail for a trusted backend**, not a multi-tenant public interpr
 
 - Keep the port on a private network. Do not put it on a public reverse proxy.
 - Only the backend should hold `SANDBOX_SECRET`.
-- User code has no outbound network in Docker; still assume it can burn CPU and disk up to the quotas.
+- Still assume user code can burn CPU and disk up to the quotas, and can make outbound network requests.
 - Do not mount `docker.sock`. Do not execute code through a shell.
 - One container per backend. Do not share it across untrusted apps.
 
@@ -270,7 +268,7 @@ Base: `$SANDBOX_URL` (no trailing slash).
 
 MCP is the same service at `$SANDBOX_URL/mcp`. Tools: `execute`, `write_file`, `read_file`, `list_files`, `delete_session`. Each tool takes `session_id`. This backend injects `session_id`; the model only sees `execute` with `{ "code": string }`.
 
-Python in the sandbox has no outbound network. Files enter only via PUT / `write_file` from the backend.
+Files enter the sandbox via PUT / `write_file` from the backend. There is no `pip`; extra packages are not installable at runtime.
 
 ## Tool the model sees
 
@@ -279,7 +277,7 @@ Python in the sandbox has no outbound network. Files enter only via PUT / `write
 - cwd is `/workspace`; uploads are `/workspace/uploads/`
 - write results into `/workspace`; they come back as download URLs from OUR backend
 - installed packages depend on the image flavor (`zero` = stdlib; `small` = openpyxl, python-docx, reportlab, python-pptx, pandas, pypandoc, matplotlib, numpy; `gpt` = ChatGPT-style scientific stack including scipy/sklearn/torch CPU)
-- do not import anything else; there is no pip and no internet
+- do not import anything else; there is no pip
 
 Backend loop: rehydrate files if needed → POST execute → GET each new file into OUR blob store → return stdout/stderr/exitCode plus `{ name, url, path, mime, size }` → persist those URLs on the chat message.
 

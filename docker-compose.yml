@@ -44,16 +44,7 @@ services:
       nofile:
         soft: 1024
         hard: 1024
-    networks:
-      - jail
     restart: unless-stopped
-
-networks:
-  jail:
-    driver: bridge
-    # No default route / NAT: process cannot reach the internet or other networks.
-    # Host access remains via the published 127.0.0.1 port.
-    internal: true
 
 volumes:
   sandbox-data:
