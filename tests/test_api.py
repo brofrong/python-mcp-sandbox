@@ -8,6 +8,8 @@ from pathlib import Path
 
 os.environ.setdefault("SANDBOX_SECRET", "test-secret")
 os.environ["SANDBOX_DATA"] = tempfile.mkdtemp(prefix="sandbox-test-")
+# Tests run outside Docker. Production images set SANDBOX_REQUIRE_ISOLATION=1.
+os.environ.setdefault("SANDBOX_REQUIRE_ISOLATION", "0")
 
 from fastapi.testclient import TestClient
 
@@ -38,6 +40,25 @@ class SessionIdValidationTest(unittest.TestCase):
                 self.assertEqual(path.name, session_id)
 
 
+class IsolationRequiredTest(unittest.TestCase):
+    def test_isolation_is_opt_in(self) -> None:
+        from sandbox.isolate import isolation_required
+
+        original = os.environ.get("SANDBOX_REQUIRE_ISOLATION")
+        try:
+            os.environ.pop("SANDBOX_REQUIRE_ISOLATION", None)
+            self.assertFalse(isolation_required())
+            os.environ["SANDBOX_REQUIRE_ISOLATION"] = "0"
+            self.assertFalse(isolation_required())
+            os.environ["SANDBOX_REQUIRE_ISOLATION"] = "1"
+            self.assertTrue(isolation_required())
+        finally:
+            if original is None:
+                os.environ.pop("SANDBOX_REQUIRE_ISOLATION", None)
+            else:
+                os.environ["SANDBOX_REQUIRE_ISOLATION"] = original
+
+
 class WorkerEnvTest(unittest.TestCase):
     def test_worker_env_omits_secret(self) -> None:
         from sandbox.isolate import worker_env
@@ -49,6 +70,7 @@ class WorkerEnvTest(unittest.TestCase):
         self.assertNotIn("SANDBOX_SECRET", env)
         self.assertEqual(env["SANDBOX_WORKSPACE"], str(workspace))
         self.assertEqual(env["SANDBOX_RESULT_FD"], "3")
+        self.assertEqual(env.get("SANDBOX_REQUIRE_ISOLATION"), "0")
 
 
 class SandboxApiTest(unittest.TestCase):

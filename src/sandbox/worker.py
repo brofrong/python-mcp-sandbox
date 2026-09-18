@@ -14,7 +14,7 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
-from sandbox.isolate import isolate_self
+from sandbox.isolate import IsolationError, isolate_self
 
 os.environ.pop("SANDBOX_SECRET", None)
 os.environ.setdefault("MPLBACKEND", "Agg")
@@ -298,6 +298,10 @@ def main() -> None:
             pass
         try:
             _kernel_main(kernel, apply_isolation=True)
+        except IsolationError as error:
+            with contextlib.suppress(OSError):
+                _send_msg(kernel, {"ok": False, "error": str(error)})
+            os._exit(1)
         except Exception:  # noqa: BLE001 — kernel startup must not fall through
             traceback.print_exc()
             os._exit(1)

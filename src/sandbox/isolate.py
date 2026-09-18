@@ -68,10 +68,16 @@ class IsolationError(Exception):
 
 
 def isolation_required() -> bool:
+    """Fail closed only when explicitly requested.
+
+    Docker sets SANDBOX_REQUIRE_ISOLATION=1. Unit tests and a native
+    Linux run (GitHub Actions, local uvicorn) often cannot unshare a
+    user/net namespace, so the default is best-effort isolation.
+    """
     flag = os.environ.get("SANDBOX_REQUIRE_ISOLATION")
-    if flag is not None:
-        return flag.strip().lower() not in {"0", "false", "no"}
-    return sys.platform == "linux"
+    if flag is None:
+        return False
+    return flag.strip().lower() not in {"", "0", "false", "no"}
 
 
 def worker_env(*, workspace: str, pythonpath: str, result_fd: int) -> dict[str, str]:
@@ -114,7 +120,10 @@ def isolate_self(workspace: str) -> None:
     if sys.platform == "linux":
         if not _unshare_net() and required:
             raise IsolationError("network unshare failed")
-        if not _landlock(workspace) and required:
+        # Landlock paths are the Docker jail layout. Applying them on a
+        # GitHub Actions / native host hides /proc and misses toolcache
+        # paths, so only enforce that filesystem policy when required.
+        if required and not _landlock(workspace):
             raise IsolationError("landlock failed")
     elif required:
         raise IsolationError("isolation required but platform is not linux")

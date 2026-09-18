@@ -30,6 +30,8 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run tests
+        env:
+          SANDBOX_REQUIRE_ISOLATION: "0"
         run: PYTHONPATH=src python -m unittest tests.test_api -v
 
   build-and-push:
