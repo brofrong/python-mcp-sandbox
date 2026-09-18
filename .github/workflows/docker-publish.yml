@@ -34,8 +34,24 @@ jobs:
           SANDBOX_REQUIRE_ISOLATION: "0"
         run: PYTHONPATH=src python -m unittest tests.test_api -v
 
+  flavors:
+    runs-on: ubuntu-latest
+    outputs:
+      include: ${{ steps.set.outputs.include }}
+    steps:
+      - id: set
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            include='[{"flavor":"zero","python_version":"3.14","platforms":"linux/amd64,linux/arm64"},{"flavor":"small","python_version":"3.14","platforms":"linux/amd64,linux/arm64"}]'
+          else
+            include='[{"flavor":"zero","python_version":"3.14","platforms":"linux/amd64,linux/arm64"},{"flavor":"small","python_version":"3.14","platforms":"linux/amd64,linux/arm64"},{"flavor":"gpt","python_version":"3.14","platforms":"linux/amd64"}]'
+          fi
+          echo "include=$include" >> "$GITHUB_OUTPUT"
+
   build-and-push:
-    needs: test
+    needs: [test, flavors]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -45,18 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - flavor: zero
-            python_version: "3.14"
-            platforms: linux/amd64,linux/arm64
-          - flavor: small
-            python_version: "3.14"
-            platforms: linux/amd64,linux/arm64
-          - flavor: gpt
-            python_version: "3.14"
-            platforms: linux/amd64
-    # gpt image is large; only build it on main / tags.
-    if: github.event_name != 'pull_request' || matrix.flavor != 'gpt'
+        include: ${{ fromJSON(needs.flavors.outputs.include) }}
 
     steps:
       - name: Checkout repository
