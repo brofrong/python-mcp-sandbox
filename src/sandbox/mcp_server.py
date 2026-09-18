@@ -33,7 +33,8 @@ INSTRUCTIONS = """\
 Python code-execution sandbox. Each session_id is a persistent kernel + /workspace.
 cwd is /workspace. Put uploads under /workspace/uploads/. Write outputs into /workspace.
 Python has no pip. Installed packages: openpyxl, python-docx,
-reportlab, python-pptx, pandas, pypandoc, numpy, matplotlib.
+reportlab, python-pptx, pandas, pypandoc, numpy, matplotlib,
+PyMuPDF, aspose-slides, pillow.
 The backend chooses session_id (typically userId_chatId). After execute, harvest file
 bytes with read_file — do not treat workspace paths as public URLs.
 """

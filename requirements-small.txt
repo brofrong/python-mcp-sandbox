@@ -7,3 +7,6 @@ pandas
 pypandoc
 numpy
 matplotlib
+PyMuPDF
+aspose-slides
+pillow

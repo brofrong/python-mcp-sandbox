@@ -7,6 +7,19 @@ RUN apt-get update \
 
 ARG FLAVOR=small
 
+# Aspose.Slides ships a bundled .NET runtime; slim images need GDI+/fonts.
+# Invariant globalization avoids ICU-major mismatches on Debian 12+.
+ENV DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+
+RUN if [ "$FLAVOR" = "small" ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends \
+        libgdiplus \
+        libfontconfig1 \
+        fonts-dejavu-core \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 RUN if [ "$FLAVOR" = "gpt" ]; then \
       apt-get update \
       && apt-get install -y --no-install-recommends \

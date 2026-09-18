@@ -40,7 +40,7 @@ Published to `ghcr.io/brofrong/python-mcp-sandbox`. Sandbox libraries are unpinn
 | Tag | Sandbox libraries | Typical use |
 | --- | --- | --- |
 | `zero` | none (Python stdlib only) | smallest image, no data-science stack |
-| `small` | openpyxl, python-docx, reportlab, python-pptx, pandas, pypandoc, numpy, matplotlib | default; also tagged `latest` |
+| `small` | openpyxl, python-docx, reportlab, python-pptx, pandas, pypandoc, numpy, matplotlib, PyMuPDF, aspose-slides, pillow | default; also tagged `latest` |
 | `gpt` | ChatGPT-style scientific stack (pandas, scipy, sklearn, torch **CPU**, jax, opencv, spacy, geo, audio, CAD, …) | amd64 only; much larger |
 
 ```bash
@@ -166,11 +166,16 @@ CPython stdlib only.
 | --- | --- | --- |
 | Excel | openpyxl | `import openpyxl` |
 | Word | python-docx | `import docx` |
-| PDF | reportlab | `from reportlab.pdfgen import canvas` |
-| PowerPoint | python-pptx | `from pptx import Presentation` |
+| PDF (write) | reportlab | `from reportlab.pdfgen import canvas` |
+| PDF (read / render / to images) | PyMuPDF | `import pymupdf` |
+| PowerPoint (edit) | python-pptx | `from pptx import Presentation` |
+| PowerPoint (convert / render) | aspose-slides | `import aspose.slides` |
+| Images (convert / resize) | pillow | `from PIL import Image` |
 | CSV / tables | pandas | `import pandas as pd` |
 | Markdown / text | pypandoc (+ system pandoc) | `import pypandoc` |
 | Plots / arrays | matplotlib, numpy | `import matplotlib.pyplot as plt`, `import numpy as np` |
+
+`aspose-slides` runs in evaluation mode without a license (watermark / slide limits). Mount a license at runtime; do not bake it into the image.
 
 ### `gpt`
 
@@ -276,7 +281,7 @@ Files enter the sandbox via PUT / `write_file` from the backend. There is no `pi
 
 - cwd is `/workspace`; uploads are `/workspace/uploads/`
 - write results into `/workspace`; they come back as download URLs from OUR backend
-- installed packages depend on the image flavor (`zero` = stdlib; `small` = openpyxl, python-docx, reportlab, python-pptx, pandas, pypandoc, matplotlib, numpy; `gpt` = ChatGPT-style scientific stack including scipy/sklearn/torch CPU)
+- installed packages depend on the image flavor (`zero` = stdlib; `small` = openpyxl, python-docx, reportlab, python-pptx, pandas, pypandoc, matplotlib, numpy, PyMuPDF, aspose-slides, pillow; `gpt` = ChatGPT-style scientific stack including scipy/sklearn/torch CPU)
 - do not import anything else; there is no pip
 
 Backend loop: rehydrate files if needed → POST execute → GET each new file into OUR blob store → return stdout/stderr/exitCode plus `{ name, url, path, mime, size }` → persist those URLs on the chat message.
