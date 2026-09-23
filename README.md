@@ -56,11 +56,24 @@ docker build -t python-mcp-sandbox:gpt --build-arg FLAVOR=gpt .
 ```bash
 docker build -t python-mcp-sandbox:small --build-arg FLAVOR=small .
 docker run -d --name sandbox \
+  --user 1000:1000 \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --pids-limit 256 \
+  --memory 4g \
+  --cpus 2.0 \
+  --ulimit core=0 \
+  --ulimit nofile=1024 \
+  --tmpfs /tmp:size=64M,mode=1777,nosuid,nodev,noexec \
+  --tmpfs /home/sandbox:size=16M,uid=1000,gid=1000,mode=0755,nosuid,nodev \
   -p 127.0.0.1:8090:8090 \
   -e SANDBOX_SECRET=change-me \
   -v sandbox-data:/data \
   python-mcp-sandbox:small
 ```
+
+Do not pass `--init`. PID 1 must not keep `SANDBOX_SECRET` in its environment.
 
 The process **will not start** without `SANDBOX_SECRET`.
 
@@ -215,7 +228,9 @@ This is a **code jail for a trusted backend**, not a multi-tenant public interpr
 
 - Keep the port on a private network. Do not put it on a public reverse proxy.
 - Only the backend should hold `SANDBOX_SECRET`.
-- Still assume user code can burn CPU and disk up to the Docker quotas, and can make outbound network requests.
+- User code can burn CPU and disk up to the Docker quotas, and can make outbound network requests.
+- On Linux the kernel process is Landlocked to its own workspace. It cannot read other sessions or other processes' `/proc/<pid>/environ`.
+- Do not pass `--init` / `init: true`. That leaves `SANDBOX_SECRET` in PID 1.
 - Do not mount `docker.sock`. Do not execute code through a shell.
 - One container per backend. Do not share it across untrusted apps.
 
@@ -239,11 +254,24 @@ You are integrating a backend with an existing Docker Python sandbox. The sandbo
 
 ```bash
 docker run -d --name sandbox \
+  --user 1000:1000 \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --pids-limit 256 \
+  --memory 4g \
+  --cpus 2.0 \
+  --ulimit core=0 \
+  --ulimit nofile=1024 \
+  --tmpfs /tmp:size=64M,mode=1777,nosuid,nodev,noexec \
+  --tmpfs /home/sandbox:size=16M,uid=1000,gid=1000,mode=0755,nosuid,nodev \
   -p 127.0.0.1:8090:8090 \
   -e SANDBOX_SECRET=<long random secret> \
   -v sandbox-data:/data \
   python-mcp-sandbox:small
 ```
+
+Do not pass `--init`.
 
 - Local: `SANDBOX_URL=http://localhost:8090`. In compose/k8s: `SANDBOX_URL=http://sandbox:8090`.
 - Process refuses to start without `SANDBOX_SECRET`.

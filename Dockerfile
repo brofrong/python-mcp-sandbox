@@ -77,7 +77,16 @@ RUN case "$FLAVOR" in \
     esac \
   && pip install --no-cache-dir -r requirements-server.txt
 
+# Aspose.Slides asks for the en-US culture. Invariant mode rejects that,
+# and the worker does not inherit DOTNET_SYSTEM_GLOBALIZATION_INVARIANT.
+RUN if [ "$FLAVOR" = "small" ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends libicu76 \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 COPY src ./src
+COPY docker/entrypoint.py /entrypoint.py
 ENV PYTHONPATH=/app/src
 ENV SANDBOX_DATA=/data
 ENV MPLBACKEND=Agg
@@ -87,7 +96,8 @@ RUN useradd --create-home --uid 1000 sandbox \
   && mkdir -p /data \
   && chown sandbox:sandbox /data \
   && chown -R root:root /app \
-  && chmod -R go-w /app
+  && chmod -R go-w /app \
+  && chmod 0555 /entrypoint.py
 
 USER sandbox
 EXPOSE 8090
@@ -95,4 +105,4 @@ EXPOSE 8090
 HEALTHCHECK --interval=15s --timeout=5s --retries=10 --start-period=20s \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"
 
-CMD ["uvicorn", "sandbox.main:app", "--host", "0.0.0.0", "--port", "8090"]
+ENTRYPOINT ["python", "/entrypoint.py"]

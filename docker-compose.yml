@@ -10,7 +10,7 @@ services:
     image: python-mcp-sandbox:${SANDBOX_FLAVOR:-small}
     container_name: sandbox
     user: "1000:1000"
-    init: true
+    # PID 1 is docker/entrypoint.py. Do not set init: tini would keep SANDBOX_SECRET.
     privileged: false
     read_only: true
     ports:

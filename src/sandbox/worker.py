@@ -14,15 +14,15 @@ import traceback
 from collections.abc import Callable
 from typing import Any
 
-from sandbox.isolate import isolate_self
+from sandbox.isolate import restrict_to_workspace
 
-os.environ.pop("SANDBOX_SECRET", None)
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 WORKSPACE = os.path.realpath(os.environ["SANDBOX_WORKSPACE"])
 VIRTUAL_ROOT = "/workspace"
 
 _globals: dict[str, object] = {"__name__": "__main__"}
+_landlocked = False
 MAX_CAPTURE = 1_000_000
 _MAX_MSG = 2_500_000
 _real_getcwd = os.getcwd
@@ -192,9 +192,16 @@ def _reap_children(_signum: int = 0, _frame: object = None) -> None:
             return
 
 
+def _ensure_landlock() -> None:
+    global _landlocked
+    if _landlocked:
+        return
+    restrict_to_workspace(WORKSPACE)
+    _landlocked = True
+
+
 def _kernel_main(conn: socket.socket, *, apply_isolation: bool) -> None:
     if apply_isolation:
-        isolate_self(WORKSPACE)
         os.chdir(WORKSPACE)
     while True:
         message = _recv_msg(conn)
@@ -227,6 +234,9 @@ def _kernel_exec(conn: socket.socket, code: str) -> None:
 
 
 def _exec_child(remote: socket.socket, code: str) -> None:
+    # Landlock in this process so /proc/self is the process that runs user code.
+    # CoreCLR (Aspose) fails if that directory was pinned to an ancestor pid.
+    _ensure_landlock()
     result = _exec(code)
     try:
         pid = os.fork()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import time
 import unittest
@@ -8,7 +9,7 @@ from pathlib import Path
 
 os.environ.setdefault("SANDBOX_SECRET", "test-secret")
 os.environ["SANDBOX_DATA"] = tempfile.mkdtemp(prefix="sandbox-test-")
-# Tests run outside Docker. The worker no longer applies Landlock/rlimits.
+# Landlock applies in the Linux worker. On macOS it is a no-op.
 
 from fastapi.testclient import TestClient
 
@@ -39,24 +40,6 @@ class SessionIdValidationTest(unittest.TestCase):
                 self.assertEqual(path.name, session_id)
 
 
-class IsolateSelfTest(unittest.TestCase):
-    def test_isolate_self_drops_secret(self) -> None:
-        from sandbox.isolate import isolate_self
-
-        original = os.environ.get("SANDBOX_SECRET")
-        workspace = Path(os.environ["SANDBOX_DATA"]) / "workspaces" / "isolate-self"
-        workspace.mkdir(parents=True, exist_ok=True)
-        try:
-            os.environ["SANDBOX_SECRET"] = "should-not-leak"
-            isolate_self(str(workspace))
-            self.assertNotIn("SANDBOX_SECRET", os.environ)
-        finally:
-            if original is None:
-                os.environ.pop("SANDBOX_SECRET", None)
-            else:
-                os.environ["SANDBOX_SECRET"] = original
-
-
 class WorkerEnvTest(unittest.TestCase):
     def test_worker_env_omits_secret(self) -> None:
         from sandbox.isolate import worker_env
@@ -69,6 +52,14 @@ class WorkerEnvTest(unittest.TestCase):
         self.assertNotIn("SANDBOX_REQUIRE_ISOLATION", env)
         self.assertEqual(env["SANDBOX_WORKSPACE"], str(workspace))
         self.assertEqual(env["SANDBOX_RESULT_FD"], "3")
+
+    @unittest.skipUnless(sys.platform != "linux", "would lock this process")
+    def test_restrict_to_workspace_is_noop_off_linux(self) -> None:
+        from sandbox.isolate import restrict_to_workspace
+
+        workspace = Path(os.environ["SANDBOX_DATA"]) / "workspaces" / "noop"
+        workspace.mkdir(parents=True, exist_ok=True)
+        restrict_to_workspace(str(workspace))
 
 
 class SandboxApiTest(unittest.TestCase):
@@ -131,6 +122,22 @@ class SandboxApiTest(unittest.TestCase):
         self.assertNotIn("SANDBOX_SECRET", os.environ)
         listed = self.client.get("/v1/sessions/secret-env", headers=AUTH)
         self.assertEqual(listed.status_code, 200)
+
+    @unittest.skipUnless(sys.platform == "linux", "landlock is linux-only")
+    def test_execute_cannot_read_sibling_workspace(self) -> None:
+        sibling = workspace_dir("sibling-secret")
+        secret_path = sibling / "secret.txt"
+        secret_path.write_text("topsecret")
+        executed = self.client.post(
+            "/v1/sessions/reader/execute",
+            headers=AUTH,
+            json={"code": f"print(open({str(secret_path)!r}).read())"},
+        )
+        self.assertEqual(executed.status_code, 200)
+        body = executed.json()
+        self.assertNotIn("topsecret", body["stdout"])
+        self.assertNotEqual(body["exitCode"], 0)
+        self.assertIn("PermissionError", body["stderr"])
 
     def test_stdout_write_does_not_spoof_execute_result(self) -> None:
         executed = self.client.post(

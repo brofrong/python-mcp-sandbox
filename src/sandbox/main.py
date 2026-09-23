@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import NoReturn
@@ -68,8 +67,6 @@ async def _reap_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    if len(os.environ.get("SANDBOX_SECRET", "")) == 0:
-        raise RuntimeError("SANDBOX_SECRET is required")
     init_bearer_secret()
     from sandbox.sessions import manager
 

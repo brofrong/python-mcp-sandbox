@@ -16,15 +16,28 @@ UNAUTHORIZED_BODY = b'{"detail":"unauthorized"}'
 _secret_digest: bytes | None = None
 
 
+def _read_secret() -> str:
+    expected = os.environ.pop("SANDBOX_SECRET", "")
+    fd_raw = os.environ.pop("SANDBOX_SECRET_FD", "")
+    if fd_raw == "":
+        return expected
+    fd = int(fd_raw)
+    try:
+        if expected == "":
+            expected = os.read(fd, 1 << 20).decode("utf-8")
+    finally:
+        os.close(fd)
+    return expected
+
+
 def init_bearer_secret() -> None:
     global _secret_digest
-    expected = os.environ.get("SANDBOX_SECRET", "")
+    expected = _read_secret()
     if len(expected) == 0:
         if _secret_digest is None:
             raise RuntimeError("SANDBOX_SECRET is required")
         return
     _secret_digest = hashlib.sha256(expected.encode("utf-8")).digest()
-    os.environ.pop("SANDBOX_SECRET", None)
 
 
 def bearer_authorized(authorization: str | None) -> bool:
