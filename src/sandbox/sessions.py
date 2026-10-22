@@ -11,7 +11,6 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from io import BufferedReader
 from pathlib import Path
 
 from sandbox.isolate import worker_env
@@ -21,6 +20,8 @@ IDLE_KERNEL_SECONDS = int(os.environ.get("SANDBOX_IDLE_KERNEL_SECONDS", "900"))
 IDLE_WORKSPACE_SECONDS = int(os.environ.get("SANDBOX_IDLE_WORKSPACE_SECONDS", "900"))
 MAX_KERNELS = int(os.environ.get("SANDBOX_MAX_KERNELS", "32"))
 WORKER_MODULE = "sandbox.worker"
+# Worker replies are capped at ~2.5 MB of JSON; leave headroom for the nonce and escaping.
+RESULT_LINE_LIMIT = 8 * 1024 * 1024
 
 
 @dataclass
@@ -28,13 +29,14 @@ class Session:
     session_id: str
     workspace: Path
     process: asyncio.subprocess.Process | None = None
-    result_file: BufferedReader | None = None
+    result_reader: asyncio.StreamReader | None = None
+    result_transport: asyncio.ReadTransport | None = None
     stderr_task: asyncio.Task[None] | None = None
     last_used: float = field(default_factory=time.time)
 
     async def ensure_worker(self) -> asyncio.subprocess.Process:
         process = self.process
-        if process is not None and process.returncode is None and self.result_file is not None:
+        if process is not None and process.returncode is None and self.result_reader is not None:
             return process
         await self.kill_worker()
         src_root = str(Path(__file__).resolve().parent.parent)
@@ -55,6 +57,8 @@ class Session:
                     result_fd=result_w,
                 ),
                 pass_fds=(result_w,),
+                # Own process group, so kill_worker can take down forked kernels too.
+                start_new_session=True,
             )
         except Exception:
             os.close(result_r)
@@ -62,28 +66,45 @@ class Session:
             raise
         os.close(result_w)
         self.process = created
-        self.result_file = os.fdopen(result_r, "rb")
+        self.result_reader, self.result_transport = await _open_result_pipe(result_r)
         self.stderr_task = asyncio.create_task(_drain_stderr(created))
         return created
 
     async def kill_worker(self) -> None:
         process = self.process
-        result_file = self.result_file
+        result_transport = self.result_transport
         stderr_task = self.stderr_task
         self.process = None
-        self.result_file = None
+        self.result_reader = None
+        self.result_transport = None
         self.stderr_task = None
-        if result_file is not None:
-            result_file.close()
-        if process is not None and process.returncode is None:
-            with suppress(ProcessLookupError, OSError):
-                process.send_signal(signal.SIGKILL)
-            with suppress(TimeoutError, ProcessLookupError):
-                await asyncio.wait_for(process.wait(), timeout=2)
+        if process is not None:
+            # The supervisor may already be gone while kernels it forked keep running.
+            with suppress(ProcessLookupError, PermissionError):
+                os.killpg(process.pid, signal.SIGKILL)
+            if process.returncode is None:
+                with suppress(TimeoutError, ProcessLookupError):
+                    await asyncio.wait_for(process.wait(), timeout=2)
+        if result_transport is not None:
+            result_transport.close()
         if stderr_task is not None:
             stderr_task.cancel()
             with suppress(asyncio.CancelledError):
                 await stderr_task
+
+
+async def _open_result_pipe(fd: int) -> tuple[asyncio.StreamReader, asyncio.ReadTransport]:
+    loop = asyncio.get_running_loop()
+    reader = asyncio.StreamReader(limit=RESULT_LINE_LIMIT)
+    pipe = os.fdopen(fd, "rb", buffering=0)
+    try:
+        transport, _protocol = await loop.connect_read_pipe(
+            lambda: asyncio.StreamReaderProtocol(reader), pipe
+        )
+    except Exception:
+        pipe.close()
+        raise
+    return reader, transport
 
 
 async def _drain_stderr(process: asyncio.subprocess.Process) -> None:
@@ -135,7 +156,7 @@ class SessionManager:
             before = snapshot(session.workspace)
             process = await session.ensure_worker()
             stdin = process.stdin
-            if stdin is None or session.result_file is None:
+            if stdin is None or session.result_reader is None:
                 await session.kill_worker()
                 return _execute_error("Python worker is not available")
             try:
@@ -176,20 +197,16 @@ class SessionManager:
     ) -> dict[str, object]:
         process = session.process
         stdin = None if process is None else process.stdin
-        result_file = session.result_file
-        if process is None or stdin is None or result_file is None:
+        result_reader = session.result_reader
+        if process is None or stdin is None or result_reader is None:
             raise OSError("worker is not available")
         nonce = secrets.token_hex(16)
         message = dict(payload)
         message["nonce"] = nonce
         stdin.write((json.dumps(message) + "\n").encode("utf-8"))
         await stdin.drain()
-        loop = asyncio.get_running_loop()
-        line = await asyncio.wait_for(
-            loop.run_in_executor(None, result_file.readline),
-            timeout=timeout_s,
-        )
-        if len(line) == 0:
+        line = await asyncio.wait_for(result_reader.readline(), timeout=timeout_s)
+        if not line.endswith(b"\n"):
             raise OSError("Python worker exited")
         body = json.loads(line.decode("utf-8"))
         if not isinstance(body, dict) or body.get("nonce") != nonce:

@@ -202,6 +202,41 @@ class SandboxApiTest(unittest.TestCase):
         self.assertTrue(body["timedOut"])
         self.assertEqual(body["exitCode"], 1)
 
+    def test_execute_timeout_does_not_block_server(self) -> None:
+        started = time.monotonic()
+        executed = self.client.post(
+            "/v1/sessions/hang/execute",
+            headers=AUTH,
+            json={
+                "code": (
+                    "import os, time\n"
+                    "open('pid.txt', 'w').write(str(os.getpid()))\n"
+                    "time.sleep(60)\n"
+                ),
+                "timeoutMs": 500,
+            },
+        )
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(executed.status_code, 200)
+        self.assertTrue(executed.json()["timedOut"])
+        pid = int((workspace_dir("hang") / "pid.txt").read_text())
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            self.fail(f"user code process {pid} survived the timeout")
+        again = self.client.post(
+            "/v1/sessions/hang/execute",
+            headers=AUTH,
+            json={"code": "print('alive')"},
+        )
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(again.json()["stdout"], "alive\n")
+
     def test_execute_and_download_file(self) -> None:
         put = self.client.put(
             "/v1/sessions/chat1/files/uploads/input.txt",

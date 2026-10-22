@@ -103,6 +103,6 @@ USER sandbox
 EXPOSE 8090
 
 HEALTHCHECK --interval=15s --timeout=5s --retries=10 --start-period=20s \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3)"
 
 ENTRYPOINT ["python", "/entrypoint.py"]
